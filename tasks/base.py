@@ -14,8 +14,16 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from core.config import AppConfig, TaskConfig
-from core.events import EventBus
+from core.events import EventBus, Events
 from core.logger import get_logger
+from core.state import (
+    bump_login_fail,
+    is_login_locked,
+    login_fail_count,
+    login_fail_info,
+    login_remaining,
+    reset_login_fail,
+)
 
 # 全局任务注册表 {task_id: task_class}
 _REGISTRY: dict[str, type["BaseTask"]] = {}
@@ -108,11 +116,17 @@ class BaseTask(ABC):
     async def run(self) -> TaskResult:
         self.events.emit("task_started", task_id=self.id, task_name=self.name)
         self.log(f"===== 任务 [{self.name}] 开始 =====")
+        # 登录重试次数用尽则直接跳过（跨天也不重置，只有登录成功才清零）
+        blocked = self.login_lock_result()
+        if blocked is not None:
+            return blocked
         try:
             await self.before()
             logged_in = await self.ensure_logged_in()
             if not logged_in:
                 raise TaskError("登录失败，无法继续签到")
+            # 登录成功（含 cookie 仍然有效）→ 清零累计失败次数
+            self.note_login_success()
             ok, message = await self.do_checkin()
             await self.after()
             self.events.emit("task_finished", task_id=self.id, success=ok)
@@ -143,6 +157,66 @@ class BaseTask(ABC):
 
     async def after(self) -> None:
         pass
+
+    # ---------- 登录重试预算（跨天累计，只有登录成功才清零） ----------
+    @property
+    def login_limit(self) -> int:
+        """本任务允许的登录失败总次数（options.max_login_retry，默认 3）"""
+        return max(1, int(self.cfg.max_login_retry))
+
+    def login_used(self) -> int:
+        return login_fail_count(self.id)
+
+    def login_remaining(self) -> int:
+        """还能再尝试几次登录（0 表示已用尽，本次不再登录）"""
+        return login_remaining(self.id, self.login_limit)
+
+    def login_locked(self) -> bool:
+        return is_login_locked(self.id, self.login_limit)
+
+    def login_lock_message(self) -> str:
+        info = login_fail_info(self.id)
+        used = info["count"]
+        when = f"，最近一次 {info['time']}" if info.get("time") else ""
+        why = f"，原因：{info['reason']}" if info.get("reason") else ""
+        return (
+            f"登录失败次数已用尽（{used}/{self.login_limit}{when}{why}）。"
+            "该计数不会按天清零，只有登录成功一次才会重置；"
+            "请先检查账号/密码/2FA/验证码是否有效，手动登录站点或点界面「重置登录失败次数」后再运行"
+        )
+
+    def login_lock_result(self) -> Optional[TaskResult]:
+        """已用尽则返回一个失败结果用于直接跳过任务，否则返回 None"""
+        if not self.login_locked():
+            return None
+        msg = self.login_lock_message()
+        self.logger.warning(f"[{self.name}] 跳过本次任务：{msg}")
+        self.events.emit(Events.LOGIN_LOCKED, task_id=self.id, used=self.login_used(),
+                         limit=self.login_limit)
+        self.events.emit("task_finished", task_id=self.id, success=False)
+        self.log(f"===== 任务 [{self.name}] 未执行：登录失败次数已用尽 =====")
+        return TaskResult(self.id, False, f"未执行：{msg}")
+
+    def note_login_success(self) -> None:
+        """登录成功 → 唯一的清零入口"""
+        used = self.login_used()
+        reset_login_fail(self.id)
+        if used:
+            self.log(f"登录成功，已清零累计的 {used} 次登录失败计数")
+
+    def note_login_failure(self, reason: str = "") -> int:
+        """登录失败一次 → 计数 +1（持久化，跨天不清零），返回累计次数"""
+        count = bump_login_fail(self.id, reason or "", self.login_limit)
+        limit = self.login_limit
+        left = max(0, limit - count)
+        if left <= 0:
+            self.logger.warning(
+                f"[{self.name}] 登录失败次数已达上限（{count}/{limit}）："
+                "之后不会再自动尝试登录，直到登录成功一次（不会因第二天而重置）")
+        else:
+            self.log(f"登录失败计数 {count}/{limit}（剩余 {left} 次机会，"
+                     "该计数跨天累计、只有登录成功才清零）")
+        return count
 
     @abstractmethod
     async def ensure_logged_in(self) -> bool:

@@ -200,7 +200,11 @@ class MTeamTask(BaseTask):
 
         if await self.find_2fa_input():
             self.log("当前页面要求两步验证，直接提交动态验证码")
-            return await self.submit_2fa()
+            ok = await self.submit_2fa()
+            if not ok:
+                if self.note_login_failure("两步验证未通过") >= self.login_limit:
+                    raise TaskError(self.login_lock_message())
+            return ok
 
         if await self.is_logged_in():
             self.log("已登录（cookie 有效）")
@@ -218,11 +222,16 @@ class MTeamTask(BaseTask):
         if not username or not password:
             raise TaskError("需要登录但未配置账号密码（config/tasks/mteam.yaml -> account）")
 
-        max_retry = self.cfg.max_login_retry
-        for attempt in range(1, max_retry + 1):
+        # 登录重试次数是**跨天累计**的预算：只有登录成功才清零（不会因为换了一天就重置）
+        limit = self.login_limit
+        remaining = self.login_remaining()
+        if remaining <= 0:
+            raise TaskError(self.login_lock_message())
+        self.log(f"登录预算：已失败 {self.login_used()}/{limit} 次，本次最多再试 {remaining} 次")
+        for attempt in range(1, remaining + 1):
             if await self.is_logged_in():
                 return True
-            self.log(f"第 {attempt}/{max_retry} 次登录尝试")
+            self.log(f"第 {attempt}/{remaining} 次登录尝试（累计失败 {self.login_used()}/{limit}）")
             try:
                 if not await self.has_login_form():
                     self.log("登录表单未出现，重新打开站点")
@@ -256,6 +265,8 @@ class MTeamTask(BaseTask):
                         break
                 self.log(f"登录未成功{hint}")
                 self.events.emit(Events.LOGIN_FAILED, task_id=self.id, attempt=attempt)
+                if self.note_login_failure(f"登录未成功{hint}") >= limit:
+                    break   # 预算用尽：不再继续尝试（跨天也不会自动恢复）
                 await browser.goto(self.cfg.url)
                 await browser.wait_timeout(2500)
             except TaskError:
@@ -267,7 +278,10 @@ class MTeamTask(BaseTask):
                     await browser.wait_timeout(2500)
                 except Exception:
                     pass
-        raise TaskError(f"账号密码登录失败（已重试 {max_retry} 次）")
+        if self.login_locked():
+            raise TaskError(self.login_lock_message())
+        raise TaskError(f"账号密码登录失败（本次重试 {remaining} 次，累计失败 "
+                        f"{self.login_used()}/{limit} 次）")
 
     async def submit_2fa(self) -> bool:
         """填写两步验证码并提交"""

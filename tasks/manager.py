@@ -35,8 +35,9 @@ class TaskManager:
                 self.logger.info(f"[事件] {name} {payload if payload else ''}")
             return handler
         for ev in ("task_started", "task_finished", "task_error", "login_page_detected",
-                   "cookie_synced", "login_success", "login_failed", "checkin_clicked",
-                   "captcha_detected", "challenge_detected", "browser_ready", "page_loaded"):
+                   "cookie_synced", "login_success", "login_failed", "login_locked",
+                   "checkin_clicked", "captcha_detected", "challenge_detected",
+                   "browser_ready", "page_loaded"):
             self.events.on(ev, make_handler(ev))
 
     # ---------- 共享组件（懒加载，跨任务复用） ----------

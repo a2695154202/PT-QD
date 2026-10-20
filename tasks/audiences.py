@@ -110,6 +110,10 @@ class AudiencesTask(NexusPHPTask):
 
     async def run(self) -> TaskResult:
         """桌面模式：用正常浏览器 + AI 识图点击完成签到"""
+        # 登录失败次数用尽则直接跳过（跨天也不重置，只有登录成功才清零）
+        blocked = self.login_lock_result()
+        if blocked is not None:
+            return blocked
         if not self.use_desktop:
             return await super().run()
         return await self._run_desktop()
@@ -118,6 +122,9 @@ class AudiencesTask(NexusPHPTask):
         self.events.emit("task_started", task_id=self.id, task_name=self.name)
         self.log(f"===== 任务 [{self.name}] 开始（桌面模式：正常浏览器 + 识图点击）=====")
         self.log("Cloudflare 对自动化浏览器校验严，改用你平时那个正常浏览器，像真人一样看图点击")
+        if self.login_used():
+            self.log(f"登录失败计数 {self.login_used()}/{self.login_limit}"
+                     f"（剩余 {self.login_remaining()} 次机会，只有登录成功才清零）")
 
         if not (self.ctx.ai and getattr(self.ctx.ai, "available", False)):
             msg = "桌面模式需要配置 AI（识图点击依赖视觉模型），请先在全局设置里配置 AI 接口"
@@ -156,9 +163,24 @@ class AudiencesTask(NexusPHPTask):
 
         # 归一化消息（不要把「获得/爆米花」这类常驻词当成成功）
         message = self._normalize_message(message)
+        if ok:
+            # 签到成功说明登录态有效 → 清零累计失败次数
+            self.note_login_success()
+        elif self._looks_like_login_failure(message):
+            # AI 明确报告登录失败 → 计入跨天累计的登录失败次数
+            self.note_login_failure(message[:80])
         self.events.emit("task_finished", task_id=self.id, success=ok)
         self.log(f"===== 任务 [{self.name}] 结束: {message} =====")
         return TaskResult(self.id, ok, message)
+
+    # 桌面模式由 AI 执行，只能从它给出的说明里判断是否属于「登录失败」
+    LOGIN_FAIL_KEYWORDS = ("登录失败", "登录未成功", "登陆失败", "密码错误", "密码不正确",
+                           "账号或密码", "用户名或密码", "账号不存在", "login failed",
+                           "invalid password", "wrong password")
+
+    def _looks_like_login_failure(self, message: str) -> bool:
+        text = (message or "").lower()
+        return any(kw.lower() in text for kw in self.LOGIN_FAIL_KEYWORDS)
 
     def _normalize_message(self, message: str) -> str:
         """把 AI 给的结果说明归一化，避免把规则文案当成签到结果"""

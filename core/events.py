@@ -38,6 +38,7 @@ class Events:
     CHALLENGE_DETECTED = "challenge_detected"  # CF/人机挑战（AI 可主动介入）
     LOGIN_SUCCESS = "login_success"
     LOGIN_FAILED = "login_failed"
+    LOGIN_LOCKED = "login_locked"          # 登录失败次数用尽，任务被跳过
     CHECKIN_CLICKED = "checkin_clicked"
     CHECKIN_SUCCESS = "checkin_success"
     TASK_STARTED = "task_started"

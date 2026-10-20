@@ -237,14 +237,19 @@ class NexusPHPTask(BaseTask):
         if not username or not password:
             raise TaskError(f"需要登录但未配置账号密码（config/tasks/{self.id}.yaml -> account）")
 
-        max_retry = self.cfg.max_login_retry
-        for attempt in range(1, max_retry + 1):
+        # 登录重试次数是**跨天累计**的预算：只有登录成功才清零（不会因为换了一天就重置）
+        limit = self.login_limit
+        remaining = self.login_remaining()
+        if remaining <= 0:
+            raise TaskError(self.login_lock_message())
+        self.log(f"登录预算：已失败 {self.login_used()}/{limit} 次，本次最多再试 {remaining} 次")
+        for attempt in range(1, remaining + 1):
             if await self.is_logged_in():
                 self.log("已是登录状态，跳过登录")
                 return True
             try:
                 if not await self.has_login_form():
-                    self.log(f"第 {attempt}/{max_retry} 次尝试：页面上没有登录表单，重新打开站点")
+                    self.log(f"第 {attempt}/{remaining} 次尝试：页面上没有登录表单，重新打开站点")
                     await self.open_site()
                     await browser.wait_timeout(1200)
                     if await self.is_logged_in():
@@ -253,7 +258,7 @@ class NexusPHPTask(BaseTask):
                     if not await self.has_login_form():
                         continue
 
-                self.log(f"第 {attempt}/{max_retry} 次登录尝试")
+                self.log(f"第 {attempt}/{remaining} 次登录尝试（累计失败 {self.login_used()}/{limit}）")
                 await browser.wait_selector(self.SEL_USERNAME, timeout=8000)
                 await browser.fill(self.SEL_USERNAME, username)
                 await browser.fill(self.SEL_PASSWORD, password)
@@ -302,6 +307,9 @@ class NexusPHPTask(BaseTask):
                         break
                 self.log(f"登录未成功{hint}，重新打开站点后重试")
                 self.events.emit(Events.LOGIN_FAILED, task_id=self.id, attempt=attempt)
+                if self.note_login_failure(f"登录未成功{hint}") >= limit:
+                    # 预算用尽：不再继续尝试（跨天也不会自动恢复）
+                    break
                 await self.open_site()
                 await browser.wait_timeout(1000)
             except Exception as e:
@@ -312,7 +320,10 @@ class NexusPHPTask(BaseTask):
                 except Exception:
                     pass
 
-        raise TaskError(f"账号密码登录失败（已重试 {max_retry} 次）")
+        if self.login_locked():
+            raise TaskError(self.login_lock_message())
+        raise TaskError(f"账号密码登录失败（本次重试 {remaining} 次，累计失败 "
+                        f"{self.login_used()}/{limit} 次）")
 
     # ---------- 签到 ----------
     @staticmethod

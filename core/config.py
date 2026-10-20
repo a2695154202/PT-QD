@@ -251,6 +251,11 @@ class TaskConfig:
 
     @property
     def max_login_retry(self) -> int:
+        """登录失败次数上限。
+
+        **跨天累计**：每次登录失败 +1，只有登录成功才清零（不按日期重置）；
+        累计到上限后该任务不再执行，直到登录成功或手动重置。
+        """
         try:
             return max(1, int(self.options.get("max_login_retry", 3)))
         except (TypeError, ValueError):
@@ -301,7 +306,8 @@ class TaskConfig:
             "# options.has_2fa       : 本任务是否有二次验证（勾选）\n"
             "# options.has_cf        : 本任务是否有 Cloudflare 人机验证（勾选；未勾选则不处理）\n"
             "# options.use_proxy     : 本任务是否走全局代理（勾选才走，未勾选强制直连）\n"
-            "# options.max_login_retry : 登录失败重试次数\n"
+            "# options.max_login_retry : 登录失败次数上限（跨天累计，只有登录成功才清零；\n"
+            "#                           用尽后该任务不再执行，需登录成功或手动重置）\n"
             "# options.schedule_time : 预留的每日签到时间\n"
         )
         body = [

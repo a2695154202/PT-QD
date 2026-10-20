@@ -17,7 +17,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from core.config import AppConfig, load_task_configs
 from core.logger import get_logger
-from core.state import load_state
+from core.state import load_state, login_fail_info, reset_login_fail, reset_all_login_fail
 from core.twofa_store import TwoFactorVault
 from tasks.manager import TaskManager
 
@@ -458,6 +458,8 @@ class SigninApp:
         toolbar = ttk.Frame(self.root, padding=6)
         toolbar.pack(fill="x")
         ttk.Button(toolbar, text="刷新任务", command=self.refresh_tasks).pack(side="left", padx=2)
+        ttk.Button(toolbar, text="重置登录失败次数",
+                   command=self.reset_all_login_fail_of).pack(side="left", padx=2)
         self.btn_run_selected = ttk.Button(toolbar, text="▶ 运行选中", command=self.run_selected)
         self.btn_run_selected.pack(side="left", padx=2)
         self.btn_run_all = ttk.Button(toolbar, text="运行全部启用", command=self.run_all)
@@ -514,6 +516,20 @@ class SigninApp:
                             variable=var).pack(side="left")
             ttk.Button(row, text="配置", width=6,
                        command=lambda tid=cfg.id: self.edit_task(tid)).pack(side="left", padx=6)
+            # 登录失败计数：跨天累计，只有登录成功才清零；用尽后任务会被跳过
+            fail = login_fail_info(cfg.id)
+            limit = cfg.max_login_retry
+            if fail["count"]:
+                used = fail["count"]
+                if used >= limit:
+                    ttk.Label(row, text=f"登录已锁定 {used}/{limit}",
+                              foreground="#c62828").pack(side="left", padx=4)
+                else:
+                    ttk.Label(row, text=f"登录失败 {used}/{limit}",
+                              foreground="#ef6c00").pack(side="left", padx=4)
+                ttk.Button(row, text="重置登录次数", width=11,
+                           command=lambda tid=cfg.id: self.reset_login_fail_of(tid)
+                           ).pack(side="left", padx=4)
             info = st.get(cfg.id, {})
             if info.get("time"):
                 ttk.Label(row, text=f"上次: {info['time']}  {info.get('message', '')}",
@@ -536,6 +552,21 @@ class SigninApp:
 
     def edit_task(self, task_id: str):
         TaskEditDialog(self.root, task_id, on_saved=self.refresh_tasks)
+
+    def reset_login_fail_of(self, task_id: str):
+        """手动清空某任务的登录失败计数（解锁该任务）"""
+        reset_login_fail(task_id)
+        LOGGER.info(f"已重置任务 [{task_id}] 的登录失败次数")
+        self.refresh_tasks()
+
+    def reset_all_login_fail_of(self):
+        """手动清空所有任务的登录失败计数"""
+        cleared = reset_all_login_fail()
+        if cleared:
+            LOGGER.info(f"已重置 {len(cleared)} 个任务的登录失败次数: {', '.join(cleared)}")
+        else:
+            LOGGER.info("没有需要重置的登录失败计数")
+        self.refresh_tasks()
 
     def open_settings(self):
         SettingsDialog(self.root, on_saved=self.refresh_tasks)
