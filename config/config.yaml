@@ -1,0 +1,49 @@
+# ============ 全局配置（可在图形界面「全局设置」中修改）============
+# browser.mode: launch=程序启动Edge并开放调试端口；attach=连接已运行的Edge
+# browser.fullscreen / always_on_top: 启动后全屏 / 窗口置顶（仅 Windows 生效）
+# ai: 任意 OpenAI 兼容接口；识别验证码需支持视觉的模型
+# cookiecloud.mode: overwrite=拉取并覆盖到浏览器 / paused=暂停同步
+# proxy: 全局代理；任务配置里勾选「走代理」的任务才使用它，未勾选的任务强制直连
+# logging: 日志级别与全局日志文件
+browser:
+  mode: launch
+  cdp_endpoint: http://127.0.0.1:9222
+  debugging_port: 9222
+  user_data_dir: data/edge_profile
+  headless: false
+  slow_mo: 50
+  default_timeout: 15000
+  viewport_width: 1440
+  viewport_height: 900
+  stealth: true
+  fullscreen: true
+  always_on_top: true
+ai:
+  enabled: false
+  base_url: https://api.openai.com/v1
+  api_key: ''
+  model: gpt-4o-mini
+  vision_model: ''
+  timeout: 60
+  proactive: true
+  prompts:
+    captcha: 这是一张网站登录/签到用的图形验证码图片，通常是4位字母数字。请只输出验证码内容本身，不要输出任何解释、标点或多余字符。
+    popup_captcha: 这是一张签到弹窗中的图形验证码图片。请只输出验证码内容本身，不要输出任何解释、标点或多余字符。
+    slider: '这是一张滑块验证码的截图，背景图中有一处缺口。请返回缺口左边缘距离图片左侧的像素 x 坐标，只输出 JSON：{"gap_x": 数字}'
+    challenge: '当前页面可能出现了人机验证（如 Cloudflare Turnstile）。请分析截图，如果需要点击复选框，返回 JSON：{"click":
+      [x, y]}，其中 x/y 为复选框在图片中的像素坐标；如果无需操作返回 {"click": null}'
+cookiecloud:
+  enabled: false
+  mode: overwrite
+  server: ''
+  uuid: ''
+  password: ''
+  domains: []
+proxy:
+  enabled: false
+  server: ''
+  username: ''
+  password: ''
+logging:
+  level: INFO
+  file: data/logs/app.log

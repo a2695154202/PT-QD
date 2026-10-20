@@ -1,0 +1,23 @@
+# ============ TTG（听听歌）签到任务配置 ============
+# 也可在图形界面任务「配置」中修改，保存后自动写回本文件
+task:
+  id: ttg
+  name: "TTG（听听歌）"
+  enabled: true
+  url: "https://site-c.example/index.php"
+
+account:
+  username: ""                  # 请填写 TTG 用户名
+  password: ""                  # 请填写 TTG 密码
+  two_step:
+    enabled: false              # TTG 登录表单没有 2FA 输入框，保持关闭
+    secret: ""
+    vault_key: ""
+
+options:
+  has_2fa: false                # 登录页无 2FA 字段
+  has_cf: true                  # 站点有 Cloudflare 保护，勾选后遇到挑战自动处理
+  use_proxy: false              # 是否走全局代理
+  max_login_retry: 3            # TTG 连续 6 次失败会封 IP，不要调大
+  checkin_url: "https://site-c.example/index.php"
+  schedule_time: "09:30"

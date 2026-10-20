@@ -1,0 +1,8 @@
+# 网站签到助手 依赖
+playwright>=1.40      # Edge 浏览器自动化（CDP）
+pyyaml>=6.0           # 配置文件
+requests>=2.31        # AI / CookieCloud HTTP 请求
+pyotp>=2.9            # TOTP 二次验证
+opencv-python-headless>=4.8  # 二维码识别（无 GUI 依赖）
+pyzbar>=0.1.9         # 二维码识别后备（模糊截图兼容性更好，Windows 自带 DLL）
+cryptography>=41.0    # CookieCloud AES 加解密

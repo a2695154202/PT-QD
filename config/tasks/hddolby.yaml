@@ -1,0 +1,27 @@
+# ============ HDDolby 签到任务配置 ============
+# 也可在图形界面任务「配置」中修改，保存后自动写回本文件
+task:
+  id: hddolby
+  name: "HDDolby"
+  enabled: true
+  url: "https://site-b.example/index.php"
+
+account:
+  username: ""                  # 请填写 HDDolby 用户名
+  password: ""                  # 请填写 HDDolby 密码
+  two_step:
+    enabled: true               # 本站登录需要两步验证
+    secret: ""                  # 直接填 base32 密钥（可选，填了优先用它）
+    vault_key: ""               # 绑定 2FA 凭证库账号，格式 "issuer|name"
+    # 导入方式：站内 usercp.php -> 两步验证 获取二维码后
+    #   python main.py import-qr <二维码图片> --task hddolby
+    # 或在图形界面「导入2FA二维码」后在任务「配置」里选择绑定
+
+options:
+  has_2fa: true                 # 本任务有二次验证（登录需填 2fa 字段）
+  has_cf: true                  # 本站有 Cloudflare 人机验证
+  use_proxy: false              # 是否走全局代理
+  max_login_retry: 3            # 登录失败重试次数（连续失败过多会封 IP）
+  checkin_url: "https://site-b.example/index.php"
+  checkin_btn: ""               # 签到按钮选择器，留空自动探测（页面结构变化时可指定）
+  schedule_time: "09:30"

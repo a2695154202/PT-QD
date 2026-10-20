@@ -1,0 +1,25 @@
+# ============ 馒头（M-Team）保活任务配置 ============
+# 需求：打开 https://site-d.example/index 保持 10 秒；若跳转登录页则登录（含 2FA）后再保持 10 秒
+task:
+  id: mteam
+  name: "馒头（M-Team）"
+  enabled: true
+  url: "https://site-d.example/index"
+
+account:
+  username: ""                  # 请填写 M-Team 用户名
+  password: ""                  # 请填写 M-Team 密码
+  two_step:
+    enabled: true               # 登录后需要两步验证
+    secret: ""                  # 直接填 base32 密钥（可选，填了优先用它）
+    vault_key: ""               # 留空则按站点域名自动匹配凭证库（M-Team - TP）
+
+options:
+  has_2fa: true                 # 登录需要两步验证码
+  has_cf: false                 # 该站未遇到 Cloudflare 挑战，如遇到可改为 true
+  use_proxy: false
+  max_login_retry: 2
+  keep_seconds: 10              # 打开首页后保持的秒数
+  sel_2fa_input: ""             # 2FA 输入框选择器，留空自动探测（页面改版时可指定）
+  sel_2fa_submit: ""            # 2FA 提交按钮选择器，留空自动探测
+  schedule_time: "09:30"

@@ -1,0 +1,32 @@
+# ===== 运行时数据（登录态、截图、日志）=====
+data/
+
+# ===== 打包产物 =====
+build/
+dist/
+release/
+*.exe
+*.bak
+*.bak2
+*.bak3
+
+# ===== 含真实凭据的本地配置（禁止提交）=====
+# dist/ 与 config-user-backup/ 里混有使用者本地的账号密码与 2FA 密钥
+config-user-backup/
+config/config.local.yaml
+config/twofa.local.yaml
+*.local.yaml
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ===== 编辑器 / 系统 =====
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
