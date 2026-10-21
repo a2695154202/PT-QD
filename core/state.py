@@ -5,7 +5,7 @@
 结构：
 {
   "audiences": {
-    "signed": true,                    # 最近一次任务是否成功（界面显示用）
+    "signed": true,                    # 最近一次任务是否成功（界面显示用；跨天自动视为未签到）
     "time": "2026-10-20 13:50",
     "message": "签到成功",
     "login_fail": {                    # 登录失败累计（**不按天清零**）
@@ -40,6 +40,18 @@ LOGIN_FAIL_KEY = "login_fail"
 
 def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M")
+
+
+def today_str() -> str:
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def _record_date(text: Any) -> str:
+    """从 "2026-10-21 09:30" / "2026-10-21T09:30" 里取出日期部分"""
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    return raw.replace("T", " ").split(" ")[0]
 
 
 def load_state() -> dict[str, dict[str, Any]]:
@@ -84,7 +96,26 @@ def record_result(task_id: str, success: bool, message: str) -> None:
 
 
 def is_signed(task_id: str) -> bool:
-    return bool(load_state().get(task_id, {}).get("signed"))
+    """**今天**是否已签到。
+
+    跨天自动视为未签到：昨天成功、今天还没跑 → 返回 False。
+    （签到结果里记录的 time 是「YYYY-MM-DD HH:MM」，用它和今天比对）
+    """
+    info = load_state().get(task_id) or {}
+    if not info.get("signed"):
+        return False
+    return _record_date(info.get("time")) == today_str()
+
+
+def record_date(task_id: str) -> str:
+    """最近一次任务记录的日期（YYYY-MM-DD），没有则空串"""
+    return _record_date((load_state().get(task_id) or {}).get("time"))
+
+
+def is_signed_on(task_id: str, date_str: str) -> bool:
+    """指定日期当天是否签到过（date_str 形如 2026-10-21）"""
+    info = load_state().get(task_id) or {}
+    return bool(info.get("signed")) and _record_date(info.get("time")) == date_str
 
 
 def last_time(task_id: str) -> str:

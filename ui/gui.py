@@ -17,7 +17,8 @@ from tkinter import filedialog, messagebox, ttk
 
 from core.config import AppConfig, load_task_configs
 from core.logger import get_logger
-from core.state import load_state, login_fail_info, reset_login_fail, reset_all_login_fail
+from core.state import (is_signed, login_fail_info, load_state, record_date,
+                        reset_all_login_fail, reset_login_fail, today_str)
 from core.twofa_store import TwoFactorVault
 from tasks.manager import TaskManager
 
@@ -451,7 +452,21 @@ class SigninApp:
         self.root.minsize(820, 500)
         self.checks: dict[str, tk.BooleanVar] = {}
         self._running = False
+        self._day = today_str()
         self._build()
+        self.root.after(30000, self._watch_day)
+
+    def _watch_day(self):
+        """跨天自动刷新：界面开着过夜也能把「已签到」变成「未签到」"""
+        try:
+            cur = today_str()
+            if cur != self._day:
+                self._day = cur
+                LOGGER.info(f"日期已变为 {cur}，刷新签到状态显示")
+                self.refresh_tasks()
+            self.root.after(30000, self._watch_day)
+        except tk.TclError:
+            pass          # 窗口已关闭
 
     # ---------- UI ----------
     def _build(self):
@@ -512,7 +527,11 @@ class SigninApp:
             self.checks[cfg.id] = var
             row = ttk.Frame(self.task_frame)
             row.pack(fill="x", pady=3)
-            ttk.Checkbutton(row, text=f"{cfg.name}({'已签到' if st.get(cfg.id, {}).get('signed') else '未签到'})",
+            # 只有「今天的记录且成功」才算已签到；昨天的成功跨天后显示为未签到
+            info = st.get(cfg.id, {})
+            rec_date = record_date(cfg.id)
+            label = "已签到" if is_signed(cfg.id) else "未签到"
+            ttk.Checkbutton(row, text=f"{cfg.name}({label})",
                             variable=var).pack(side="left")
             ttk.Button(row, text="配置", width=6,
                        command=lambda tid=cfg.id: self.edit_task(tid)).pack(side="left", padx=6)
@@ -530,9 +549,10 @@ class SigninApp:
                 ttk.Button(row, text="重置登录次数", width=11,
                            command=lambda tid=cfg.id: self.reset_login_fail_of(tid)
                            ).pack(side="left", padx=4)
-            info = st.get(cfg.id, {})
             if info.get("time"):
-                ttk.Label(row, text=f"上次: {info['time']}  {info.get('message', '')}",
+                # 昨天的记录标注为「上次」，避免被当成今天的签到结果
+                prefix = "上次" if rec_date != today_str() else "今天"
+                ttk.Label(row, text=f"{prefix}: {info['time']}  {info.get('message', '')}",
                           foreground="gray").pack(side="left")
         # 2FA 凭证库概览
         try:
