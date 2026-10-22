@@ -160,6 +160,43 @@ class BaseTask(ABC):
     async def after(self) -> None:
         pass
 
+    # ---------- CookieCloud（所有任务：先同步 cookie，再打开站点） ----------
+    @property
+    def site_domain(self) -> str:
+        """本站域名（用于从 CookieCloud 里挑出本站 cookie）"""
+        domain = getattr(self, "_domain", "") or ""
+        if not domain:
+            try:
+                from urllib.parse import urlparse
+                domain = urlparse(self.cfg.url or getattr(self, "site", "")).hostname or ""
+            except Exception:
+                domain = ""
+        return domain
+
+    async def prepare_cookies(self) -> bool:
+        """**打开站点之前**把 CookieCloud 的 cookie 注入浏览器上下文。
+
+        每个任务的 ensure_logged_in 第一步都调用它，保证「先同步 cookie 再开始运行」。
+        """
+        cc = self.ctx.cookiecloud
+        if not cc or not cc.cfg.enabled:
+            return False
+        if cc.cfg.mode == "paused":
+            self.log("CookieCloud 工作模式为「暂停同步」，跳过")
+            return False
+        try:
+            cookies = cc.get_cookies(domains=[self.site_domain])
+            if not cookies:
+                self.log("CookieCloud 中未找到本站 cookie")
+                return False
+            await self.ctx.browser.add_cookies(cookies)
+            self.events.emit(Events.COOKIE_SYNCED, task_id=self.id, count=len(cookies))
+            self.log(f"打开站点前已注入 {len(cookies)} 个 cookie")
+            return True
+        except Exception as e:
+            self.logger.warning(f"CookieCloud 预注入失败: {e}")
+            return False
+
     # ---------- 登录重试预算（跨天累计，只有登录成功才清零） ----------
     @property
     def login_limit(self) -> int:

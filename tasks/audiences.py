@@ -122,6 +122,11 @@ class AudiencesTask(NexusPHPTask):
         self.events.emit("task_started", task_id=self.id, task_name=self.name)
         self.log(f"===== 任务 [{self.name}] 开始（桌面模式：正常浏览器 + 识图点击）=====")
         self.log("Cloudflare 对自动化浏览器校验严，改用你平时那个正常浏览器，像真人一样看图点击")
+        # 桌面模式用的是用户自己的浏览器，CookieCloud 的 cookie 注入不进去，
+        # 登录态以该浏览器里的为准（自动化模式才会在打开站点前注入 CookieCloud cookie）
+        if self.ctx.cookiecloud and getattr(self.ctx.cookiecloud.cfg, "enabled", False):
+            self.log("桌面模式不注入 CookieCloud cookie，沿用你浏览器里的登录态；"
+                     "未登录时由识图点击走账号密码登录")
         if self.login_used():
             self.log(f"登录失败计数 {self.login_used()}/{self.login_limit}"
                      f"（剩余 {self.login_remaining()} 次机会，只有登录成功才清零）")

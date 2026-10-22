@@ -166,25 +166,7 @@ class MTeamTask(BaseTask):
         return ""
 
     # ---------- Cookie ----------
-    async def prepare_cookies(self) -> bool:
-        cc = self.ctx.cookiecloud
-        if not cc or not cc.cfg.enabled:
-            return False
-        if cc.cfg.mode == "paused":
-            self.log("CookieCloud 工作模式为「暂停同步」，跳过")
-            return False
-        try:
-            cookies = cc.get_cookies(domains=[self._domain])
-            if not cookies:
-                self.log("CookieCloud 中未找到本站 cookie")
-                return False
-            await self.ctx.browser.add_cookies(cookies)
-            self.events.emit(Events.COOKIE_SYNCED, task_id=self.id, count=len(cookies))
-            self.log(f"打开站点前已注入 {len(cookies)} 个 cookie")
-            return True
-        except Exception as e:
-            self.logger.warning(f"CookieCloud 预注入失败: {e}")
-            return False
+    # prepare_cookies（打开站点前注入 CookieCloud cookie）统一在 BaseTask.prepare_cookies
 
     # ---------- 主流程 ----------
     async def ensure_logged_in(self) -> bool:
