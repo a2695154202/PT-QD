@@ -12,7 +12,7 @@
 | AI 能力（用户配置） | OpenAI 兼容接口；验证码识别、滑块缺口定位、CF 挑战主动点击；事件驱动「主动触发」 |
 | CookieCloud | 输入服务器/UUID/密钥，本地 AES 解密同步 cookie；工作模式：**覆盖到浏览器 / 暂停同步**，默认同步全部站点；**在打开站点之前就把 cookie 注入浏览器** |
 | 代理 | 全局设置代理地址（http/socks5 + 可选账号密码）；任务配置里勾选「本任务走代理」才使用，未勾选的任务强制直连 |
-| 签到任务 | 任务基类 + 注册表 + YAML 配置；任务可单独勾选是否有 2FA / CF 验证 / 走代理。内置 **PT-空（site-a.example）**、**HDDolby（site-b.example）**、**TTG 听听歌（site-c.example）**、**馒头 M-Team（site-d.example）**、**人人 Audiences（site-e.example）**、**Akile（site-f.example，控制台「每日签到」）** |
+| 签到任务 | 任务基类 + 注册表 + YAML 配置；任务可单独勾选是否有 2FA / CF 验证 / 走代理。内置 **PT-空（site-a.example）**、**HDDolby（site-b.example）**、**TTG 听听歌（site-c.example）**、**馒头 M-Team（site-d.example）**、**人人 Audiences（site-e.example）**、**Akile（site-f.example，控制台「每日签到」）**、**憨憨 HHCLUB（site-g.example，attendance.php 停留即签到）** |
 | 任务队列 | 严格串行：一个任务跑完再跑下一个；队列全部结束后才关闭浏览器（任务之间浏览器保持运行）
 | 运行日志 | 每次运行单独写入 `data/logs/run_日期_时间.log`；运行结束自动关闭浏览器 |
 | 设置持久化 | 所有设置保存到本地 YAML，启动自动载入；图形界面内即可编辑保存 |
@@ -154,7 +154,8 @@ options:
 │   ├── ttg.py               # TTG 听听歌任务实现（多语言表单 + JS 签到）
 │   ├── mteam.py             # 馒头 M-Team 任务实现（React 单页应用 + 2FA + 保活）
 │   ├── audiences.py         # 人人 Audiences 任务（默认桌面模式：正常浏览器 + 识图点击；可退自动化）
-│   └── akile.py             # Akile 任务（Vue 单页应用：登录 + 验证器 2FA + 控制台「每日签到」）
+│   ├── akile.py             # Akile 任务（Vue 单页应用：登录 + 验证器 2FA + 控制台「每日签到」）
+│   └── hhan.py              # 憨憨 HHCLUB 任务（NexusPHP：图形验证码 + two_step_code，attendance.php 停留即签到）
 ├── ui/gui.py                # Tkinter 界面（主窗口 + 任务配置 + 全局设置）
 └── data/                    # 运行时生成：Edge profile、截图、日志
 ```
