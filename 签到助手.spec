@@ -26,6 +26,7 @@ hiddenimports = [
     "core.browser", "core.ai", "core.captcha", "core.slider", "core.cf",
     "core.cookiecloud", "core.totp", "core.twofa_store", "core.events",
     "core.config", "core.logger", "core.state", "core.scheduler", "core.captcha",
+    "core.browser_bridge", "core.desktop", "core.desktop_agent",
     "tasks.base", "tasks.manager", "tasks.nexusphp",
     "tasks.pt_kong", "tasks.hddolby", "tasks.ttg", "tasks.mteam", "tasks.audiences",
     "tasks.akile", "tasks.hhan",

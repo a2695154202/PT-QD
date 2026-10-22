@@ -30,10 +30,18 @@ NexusPHP（BlasphemyOrange 皮肤），登录页 https://site-e.example/index.ph
 """
 from __future__ import annotations
 
+import asyncio
+from dataclasses import replace
+
+from core.browser import BrowserController
+from core.browser_bridge import ProfileBridge
+from core.captcha import CaptchaSolver
+from core.cf import CFHandler
 from core.desktop import DesktopController
 from core.desktop_agent import DesktopAgent
+from core.slider import SliderSolver
 
-from .base import TaskResult, register
+from .base import TaskError, TaskResult, register
 from .nexusphp import NexusPHPTask
 
 
@@ -75,6 +83,13 @@ class AudiencesTask(NexusPHPTask):
         "请返回该复选框在图片中的像素坐标，格式为 JSON：{\"click\": [x, y]}；"
         "如果已经显示勾选、正在验证中、或没有可点击的复选框，请返回 {\"click\": null}。"
         "只输出 JSON，不要任何解释。"
+    )
+
+    # 桌面模式给 AI 的 CF 处理说明（正常浏览器没有调试端口，只能靠识图操作）
+    CF_HINT = (
+        "\n\n现在这个网页可能会遇到 CF 拦截：如果拦截时需要点击或拖动才能过验证，"
+        "请你进行相关操作（点「请验证您是真人」的复选框，或按住滑块拖到缺口位置）；"
+        "验证通过后页面会自动跳转，请继续完成签到。"
     )
 
     # ---------- 桌面模式（默认）：正常浏览器 + 识图点击 ----------
@@ -119,14 +134,18 @@ class AudiencesTask(NexusPHPTask):
         return await self._run_desktop()
 
     async def _run_desktop(self) -> TaskResult:
+        """桌面模式：CookieCloud → 正常浏览器（无调试端口）签到；cookie 无效则用调试浏览器登录。
+
+        流程：
+        1. 从 CookieCloud 取本站 cookie，写入「正常浏览器」的 profile
+        2. 判定这些 cookie 是否还有效（带 cookie 请求签到页看是否被踢到登录页）
+        3. 有效 → 直接打开正常浏览器签到
+           无效 → 用「开了调试端口的 Edge」打开登录页自动登录（识别验证码/2FA），
+                  cookie 落盘到同一 profile，再打开正常浏览器签到
+        4. 正常浏览器最大化 + 置顶，由 AI 识图通过 Turnstile 并点签到
+        """
         self.events.emit("task_started", task_id=self.id, task_name=self.name)
-        self.log(f"===== 任务 [{self.name}] 开始（桌面模式：正常浏览器 + 识图点击）=====")
-        self.log("Cloudflare 对自动化浏览器校验严，改用你平时那个正常浏览器，像真人一样看图点击")
-        # 桌面模式用的是用户自己的浏览器，CookieCloud 的 cookie 注入不进去，
-        # 登录态以该浏览器里的为准（自动化模式才会在打开站点前注入 CookieCloud cookie）
-        if self.ctx.cookiecloud and getattr(self.ctx.cookiecloud.cfg, "enabled", False):
-            self.log("桌面模式不注入 CookieCloud cookie，沿用你浏览器里的登录态；"
-                     "未登录时由识图点击走账号密码登录")
+        self.log(f"===== 任务 [{self.name}] 开始（桌面模式：正常浏览器签到 + 调试浏览器登录）=====")
         if self.login_used():
             self.log(f"登录失败计数 {self.login_used()}/{self.login_limit}"
                      f"（剩余 {self.login_remaining()} 次机会，只有登录成功才清零）")
@@ -137,34 +156,96 @@ class AudiencesTask(NexusPHPTask):
             self.events.emit("task_error", task_id=self.id, error=msg)
             return TaskResult(self.id, False, msg)
 
+        opts = self.cfg.options
+        bridge = ProfileBridge(
+            profile_dir=(opts.get("desktop_profile") or "data/desktop_profile"),
+            port=int(opts.get("desktop_debug_port") or 9223),
+            events=self.events,
+        )
+        title_kw = (opts.get("desktop_window_title") or "Audiences").strip()
+        maximized = bool(opts.get("normal_maximized", True))
+        topmost = bool(opts.get("normal_topmost", True))
+        keep_open = bool(opts.get("keep_normal_open", False))
+        try:
+            startup_wait = float(opts.get("desktop_startup_wait") or 6)
+        except (TypeError, ValueError):
+            startup_wait = 6.0
+
         desktop = DesktopController()
         agent = DesktopAgent(self.ctx.ai, desktop)
-
-        # 账号密码（未登录时 AI 要用）
         cred = ""
         if self.cfg.username and self.cfg.password:
             cred = (f"\n\n账号信息（仅在需要登录时使用）：\n"
                     f"用户名：{self.cfg.username}\n密码：{self.cfg.password}\n"
                     f"（若页面有两步验证码输入框，留空即可，该账号未开启 2FA）")
-
-        goal = self.DESKTOP_GOAL + cred
+        goal = self.DESKTOP_GOAL + self.CF_HINT + cred
 
         try:
-            # 用正常浏览器打开签到页（不带自动化标志 / 调试端口）
-            DesktopController.open_browser(self.CHECKIN_URL)
-            self.log("已用正常浏览器打开签到页，等待页面加载…")
-            import time
-            time.sleep(6)   # 等浏览器启动 + 页面渲染 + CF 初步判定
+            # ---------- 0. 清理上次遗留的浏览器（profile 被占用会导致注入/登录失败）----------
+            bridge.close_stale()
 
+            # ---------- 1. CookieCloud → 正常浏览器 profile ----------
+            cookies = await self._cookie_cloud_cookies()
+            if cookies:
+                await bridge.inject_cookies(cookies)
+            else:
+                self.log("没有 CookieCloud cookie，读取正常浏览器 profile 里已有的 cookie")
+                try:
+                    cookies = await bridge.read_profile_cookies()
+                except Exception as e:
+                    self.logger.warning(f"读取 profile cookie 失败: {e}")
+                    cookies = []
+                if cookies:
+                    self.log(f"profile 里有 {len(cookies)} 个 cookie，先验证是否仍有效")
+
+            # ---------- 2. 判定 cookie 是否有效 ----------
+            logged = False
+            if cookies:
+                logged, why = await asyncio.to_thread(
+                    ProfileBridge.check_login, cookies, self.CHECKIN_URL)
+                self.log(f"cookie 判定：{'有效' if logged else '无效'} —— {why}")
+            else:
+                self.log("没有可用 cookie → 直接走登录")
+
+            # ---------- 3. 无效则用调试浏览器登录 ----------
+            if not logged:
+                self.log("在「开了调试端口的浏览器」打开登录页登录（识别验证码/2FA）")
+                try:
+                    logged = await self._login_in_debug_browser(bridge)
+                except TaskError as e:
+                    if self.login_locked():
+                        msg = str(e)
+                        self.log(msg)
+                        self.events.emit("task_error", task_id=self.id, error=msg)
+                        return TaskResult(self.id, False, msg)
+                    self.log(f"调试浏览器登录未成功：{e}")
+                    logged = False
+                if logged:
+                    self.log("登录成功，cookie 已落盘到正常浏览器的 profile")
+                    await asyncio.sleep(1.5)      # 等调试浏览器彻底退出、释放 profile
+                else:
+                    self.log("登录页可能被 CF 拦住（自动化浏览器过不去）→ "
+                             "改在正常浏览器里由 AI 完成登录 + 签到")
+
+            # ---------- 4. 正常浏览器打开签到页（最大化 + 置顶）----------
+            self.log("打开正常浏览器（无调试端口）执行签到")
+            bridge.launch_normal(self.CHECKIN_URL, maximized=maximized, topmost=topmost,
+                                 title_keyword=title_kw, wait=max(10.0, startup_wait + 8))
+            await asyncio.sleep(startup_wait)      # 等页面渲染 + CF 初步判定
+
+            # ---------- 5. AI 识图完成签到 ----------
             ok, message = await agent.drive(
                 goal=goal,
-                window_title="",          # 匹配任意浏览器窗口
-                max_steps=int(self.cfg.options.get("desktop_max_steps", 20)),
+                window_title=title_kw,
+                max_steps=int(opts.get("desktop_max_steps", 20)),
             )
         except Exception as e:
             self.logger.exception(f"桌面模式执行异常: {e}")
             self.events.emit("task_error", task_id=self.id, error=str(e))
             return TaskResult(self.id, False, f"任务异常: {e}")
+        finally:
+            if not keep_open:
+                bridge.close_normal()
 
         # 归一化消息（不要把「获得/爆米花」这类常驻词当成成功）
         message = self._normalize_message(message)
@@ -177,6 +258,60 @@ class AudiencesTask(NexusPHPTask):
         self.events.emit("task_finished", task_id=self.id, success=ok)
         self.log(f"===== 任务 [{self.name}] 结束: {message} =====")
         return TaskResult(self.id, ok, message)
+
+    # ---------- 桌面模式辅助 ----------
+    async def _cookie_cloud_cookies(self) -> list[dict]:
+        """从 CookieCloud 取本站 cookie（未启用/暂停同步时返回空列表）"""
+        cc = self.ctx.cookiecloud
+        if not cc or not getattr(cc.cfg, "enabled", False):
+            self.log("CookieCloud 未启用，跳过同步")
+            return []
+        if getattr(cc.cfg, "mode", "overwrite") == "paused":
+            self.log("CookieCloud 工作模式为「暂停同步」，跳过")
+            return []
+        try:
+            cookies = cc.get_cookies(domains=[self._domain]) or []
+        except Exception as e:
+            self.logger.warning(f"读取 CookieCloud cookie 失败: {e}")
+            return []
+        self.log(f"CookieCloud 取到本站 {len(cookies)} 个 cookie" if cookies
+                 else "CookieCloud 中未找到本站 cookie")
+        return cookies
+
+    async def _login_in_debug_browser(self, bridge: ProfileBridge) -> bool:
+        """用「开了调试端口的浏览器」登录；登录态随 profile 落盘给正常浏览器用。"""
+        cfg = replace(
+            self.ctx.app_cfg.browser,
+            mode="launch",
+            user_data_dir=bridge.profile_abs,
+            debugging_port=bridge.port,
+            headless=False,          # 有验证码/CF 时看得见更好排查
+            fullscreen=False,
+            always_on_top=False,
+        )
+        dbg = BrowserController(cfg, self.events)
+        old = (self.ctx.browser, self.ctx.captcha, self.ctx.slider, self.ctx.cf)
+        try:
+            await dbg.start()
+            self.ctx.browser = dbg
+            self.ctx.captcha = CaptchaSolver(self.ctx.ai, dbg, self.events)
+            self.ctx.slider = SliderSolver(self.ctx.ai, dbg)
+            self.ctx.cf = CFHandler(dbg, self.ctx.ai, self.events)
+            self.log("调试浏览器已就绪，开始自动登录")
+            ok = await self.login_with_password()
+            if ok:
+                try:
+                    n = len(await dbg.context.cookies())
+                    self.log(f"调试浏览器当前有 {n} 个 cookie，关闭后写入 profile")
+                except Exception:
+                    pass
+            return ok
+        finally:
+            try:
+                await dbg.stop()          # 关闭时 cookie 落盘到 profile
+            except Exception:
+                pass
+            (self.ctx.browser, self.ctx.captcha, self.ctx.slider, self.ctx.cf) = old
 
     # 桌面模式由 AI 执行，只能从它给出的说明里判断是否属于「登录失败」
     LOGIN_FAIL_KEYWORDS = ("登录失败", "登录未成功", "登陆失败", "密码错误", "密码不正确",

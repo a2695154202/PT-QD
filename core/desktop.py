@@ -42,6 +42,12 @@ VK_CONTROL = 0x11
 VK_RETURN = 0x0D
 SW_RESTORE = 9
 SW_SHOW = 5
+SW_MAXIMIZE = 3
+HWND_TOPMOST = -1
+HWND_NOTOPMOST = -2
+SWP_NOSIZE = 0x0001
+SWP_NOMOVE = 0x0002
+SWP_SHOWWINDOW = 0x0040
 SM_CXSCREEN, SM_CYSCREEN = 0, 1
 PW_RENDERFULLCONTENT = 2
 
@@ -321,8 +327,8 @@ class DesktopController:
         get_logger().info(f"已用正常浏览器打开: {url}")
 
     @staticmethod
-    def find_browser_window(title_keyword: str = "") -> Optional[int]:
-        """找浏览器窗口句柄（匹配窗口类 Chrome_WidgetWin_1，Edge/Chrome 都是它）"""
+    def list_browser_windows(title_keyword: str = "") -> list[int]:
+        """列出所有浏览器窗口句柄（Edge/Chrome 的窗口类都是 Chrome_WidgetWin_1）"""
         _ensure_dpi_aware()
         result: list[int] = []
 
@@ -340,8 +346,7 @@ class DesktopController:
                 title = buf.value
                 cls = ctypes.create_unicode_buffer(256)
                 user32.GetClassNameW(hwnd, cls, 256)
-                is_browser = cls.value in ("Chrome_WidgetWin_1", "MozillaWindowClass")
-                if not is_browser:
+                if cls.value not in ("Chrome_WidgetWin_1", "MozillaWindowClass"):
                     return True
                 if title_keyword and title_keyword.lower() not in title.lower():
                     return True
@@ -351,7 +356,13 @@ class DesktopController:
             return True
 
         user32.EnumWindows(WNDENUMPROC(_cb), 0)
-        return result[0] if result else None
+        return result
+
+    @staticmethod
+    def find_browser_window(title_keyword: str = "") -> Optional[int]:
+        """找浏览器窗口句柄（匹配窗口类 Chrome_WidgetWin_1，Edge/Chrome 都是它）"""
+        wins = DesktopController.list_browser_windows(title_keyword)
+        return wins[0] if wins else None
 
     @staticmethod
     def window_rect(hwnd: int) -> Optional[tuple[int, int, int, int]]:
@@ -370,6 +381,40 @@ class DesktopController:
             return True
         except Exception:
             return False
+
+    @staticmethod
+    def maximize_window(hwnd: int) -> bool:
+        """最大化窗口"""
+        try:
+            user32.ShowWindow(hwnd, SW_MAXIMIZE)
+            time.sleep(0.2)
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def set_topmost(hwnd: int, topmost: bool = True) -> bool:
+        """窗口置顶 / 取消置顶（始终显示在其它窗口之上）"""
+        try:
+            user32.SetWindowPos(
+                hwnd, HWND_TOPMOST if topmost else HWND_NOTOPMOST,
+                0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
+            time.sleep(0.2)
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def wait_browser_window(title_keyword: str = "", timeout: float = 20.0,
+                            interval: float = 0.6) -> Optional[int]:
+        """等浏览器窗口出现，返回句柄（最多等 timeout 秒）"""
+        deadline = time.time() + max(1.0, timeout)
+        while time.time() < deadline:
+            hwnd = DesktopController.find_browser_window(title_keyword)
+            if hwnd:
+                return hwnd
+            time.sleep(interval)
+        return None
 
     def capture_window(self, hwnd: int, name: Optional[str] = None) -> tuple[bytes, tuple[int, int, int, int]]:
         """截取指定窗口区域（先激活前置），返回 (PNG bytes, 窗口矩形)"""

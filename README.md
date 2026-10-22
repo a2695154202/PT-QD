@@ -136,7 +136,8 @@ options:
 │   ├── captcha.py           # 验证码识别（页面元素 → AI → 文本）
 │   ├── slider.py            # 滑块验证码（AI 定位缺口 + 拟人拖动）
 │   ├── cf.py                # CF/人机挑战（每秒实时探测点击/滑动控件，元素定位优先，AI 兜底）
-│   ├── desktop.py           # 桌面控制（Win32 屏幕截图 + 鼠标/键盘原生输入，识图点击用）
+│   ├── desktop.py           # 桌面控制（Win32 屏幕截图 + 鼠标/键盘原生输入 + 窗口最大化/置顶）
+│   ├── browser_bridge.py    # profile 桥接（调试浏览器写 cookie ↔ 正常浏览器签到，共用同一 profile）
 │   ├── desktop_agent.py     # 识图点击 Agent（AI 看屏幕截图，决定点哪里、填什么）
 │   ├── browser_tools.py     # 浏览器工具箱（MCP 与 AI 托管共用的一套工具定义）
 │   ├── mcp_server.py        # 浏览器 MCP 服务端（stdio JSON-RPC，供外部 AI 接管浏览器）
@@ -156,7 +157,7 @@ options:
 │   ├── hddolby.py           # HDDolby 任务实现（继承 NexusPHP 基类）
 │   ├── ttg.py               # TTG 听听歌任务实现（多语言表单 + JS 签到）
 │   ├── mteam.py             # 馒头 M-Team 任务实现（React 单页应用 + 2FA + 保活）
-│   ├── audiences.py         # 人人 Audiences 任务（默认桌面模式：正常浏览器 + 识图点击；可退自动化）
+│   ├── audiences.py         # 人人 Audiences 任务（默认桌面模式：CookieCloud→正常浏览器签到，无效才调试浏览器登录）
 │   ├── akile.py             # Akile 任务（Vue 单页应用：登录 + 验证器 2FA + 控制台「每日签到」）
 │   └── hhan.py              # 憨憨 HHCLUB 任务（NexusPHP：图形验证码 + two_step_code，attendance.php 停留即签到）
 ├── ui/gui.py                # Tkinter 界面（主窗口 + 任务配置 + 全局设置）
@@ -255,30 +256,48 @@ python main.py gui                     # 启动图形界面
 
 **该任务默认走「桌面模式」**（`options.desktop_mode: true`），与其它任务不同：
 
-### 桌面模式（默认）：正常浏览器 + 识图点击
+### 桌面模式（默认）：CookieCloud → 正常浏览器签到；无效才用调试浏览器登录
 
-Cloudflare 能识别 Playwright/CDP 驱动的自动化浏览器，对人机验证卡得特别死。
-所以人人任务改成用**你平时那个正常浏览器**打开站点，再由 AI **看屏幕截图识图点击**：
+Cloudflare 能识别 Playwright/CDP 驱动的自动化浏览器，对人机验证卡得特别死；
+但登录页只是普通图形验证码，交给自动化反而又快又稳。所以人人任务拆成两段：
 
-1. 用系统默认浏览器打开 `https://site-e.example/index.php`（不带任何自动化标志 / 调试端口）
-2. AI 看屏幕截图 → 返回动作 JSON（`click` / `type` / `drag` / `scroll` / `wait` / `finish`）
-3. 桌面控制器用 OS 原生输入执行（`SetCursorPos` / `mouse_event` / `keybd_event`）
-4. 重复直到看到「签到成功 / 今日已签到」或步数用尽
+```
+CookieCloud 取 cookie
+   └─ 写入「正常浏览器」的 profile（同一 profile → cookie 天然共享）
+        └─ 带 cookie 请求签到页，判定是否仍有效
+             ├─ 有效 → 打开正常浏览器（无调试端口，最大化 + 置顶）→ AI 识图过 Turnstile 并签到
+             └─ 无效 → 用「开了调试端口的 Edge」打开登录页自动登录（识别验证码 / 2FA）
+                        → cookie 落盘到同一 profile → 再打开正常浏览器签到
+```
 
-这样 CF 看到的是"真人看着屏幕点鼠标"，无从识别自动化。
+- **两个浏览器共用一个独立 profile**（`data/desktop_profile`），所以 cookie 不需要"跨进程注入"：
+  调试浏览器关闭时 cookie 落盘，正常浏览器启动就是登录状态
+- **正常浏览器不带 `--remote-debugging-port`**，CF 看到的是普通浏览器；窗口 `--start-maximized` 并置顶
+- **签到页的 CF 由 AI 在正常浏览器里处理**（没有调试端口，只能靠识图操作）：
+  提示词明确要求「如果拦截时需要点击或拖动才能过验证，请你进行相关操作」，
+  AI 会点「请验证您是真人」复选框或按住滑块拖到缺口
+- 若登录页也被 CF 拦住（自动化浏览器过不去）：自动回退到「正常浏览器里由 AI 识别验证码并登录 + 签到」
+- 判定 cookie 是否有效用「带 cookie 请求签到页，看是否被踢到登录页」，不用开浏览器，几秒出结果
+- 会话 cookie（`expires=-1`）会自动补 30 天有效期，否则 Chromium 不会写进 profile（关键细节）
 
 **实现**：
-- `core/desktop.py`：Win32 屏幕截图（GDI BitBlt → numpy → cv2 PNG）+ 鼠标/键盘原生输入，
-  **零新依赖**（cv2/numpy 项目里本来就有）
+- `core/browser_bridge.py`：profile 桥接（写/读 cookie、启动/关闭正常浏览器、最大化 + 置顶、
+  清理残留进程）；`core/desktop.py` 补了窗口最大化/置顶 API
 - `core/desktop_agent.py`：识图点击 Agent（ReAct 循环，带历史避免重复无效动作）
 - 坐标约定：截图是屏幕物理像素，AI 返回的 x/y 直接就是 `SetCursorPos` 坐标（一一对应）
-- 启动时调用 `SetProcessDPIAware`，避免坐标被 Windows 虚拟化缩放
 
 **配置**（`config/tasks/audiences.yaml`）：
 ```yaml
 options:
-  desktop_mode: true        # false 时退回下面的自动化模式
-  desktop_max_steps: 20     # 识图点击最多多少步
+  desktop_mode: true
+  desktop_profile: "data/desktop_profile"   # 调试/正常浏览器共用的 profile
+  desktop_debug_port: 9223                  # 调试浏览器端口（别和全局 9222 冲突）
+  desktop_window_title: "Audiences"         # 正常浏览器窗口标题关键字（定位窗口用）
+  desktop_startup_wait: 6                   # 打开后等页面渲染的秒数
+  desktop_max_steps: 20                     # 识图点击最多多少步
+  normal_maximized: true                    # 正常浏览器最大化
+  normal_topmost: true                      # 正常浏览器置顶
+  keep_normal_open: false                   # 签到后是否保留浏览器窗口
 ```
 
 ### 自动化模式（`desktop_mode: false` 时）

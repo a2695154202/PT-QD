@@ -495,6 +495,48 @@ class CFHandler:
             "返回其像素坐标 JSON：{\"click\": [x, y]}；若已勾选或无可点击项返回 {\"click\": null}。"
         )
 
+    def _viewport_prompt(self) -> str:
+        """整屏截图用的提示词：控件在闭合 shadow DOM 里、选择器完全定位不到时使用"""
+        return (
+            "这是浏览器窗口截图，页面上可能有 Cloudflare 人机验证："
+            "通常是一个写着「请验证您是真人」的复选框（方框），或需要拖动/点击的控件。\n"
+            "如果图中有**尚未勾选**的复选框，请返回它中心的像素坐标，只输出 JSON："
+            "{\"click\": [x, y]}\n"
+            "如果已经勾选、正在转圈验证、或者页面没有可点击的验证控件，只输出："
+            "{\"click\": null}\n"
+            "坐标以截图左上角为原点、单位是像素。不要输出任何解释文字。"
+        )
+
+    async def _ai_click_viewport(self) -> tuple[bool, str]:
+        """页面上**完全定位不到**控件时的兜底：整屏截图交给 AI 找复选框并点击。
+
+        新版 CF 托管挑战会把 Turnstile 渲染在闭合 shadow root 里，
+        主文档选择器和 page.frames 都可能看不到 —— 这时只能靠视觉定位。
+        """
+        if not (self.ai and getattr(self.ai, "available", False)
+                and getattr(self.ai.cfg, "proactive", True)):
+            return False, ""
+        try:
+            img = await self.browser.screenshot(name="cf_viewport")
+            data = self.ai.vision_json(img, self._viewport_prompt()) or {}
+            point = data.get("click")
+            if not point or len(point) != 2:
+                return False, ""
+            x, y = float(point[0]), float(point[1])
+            vp = await self.browser.page.evaluate(
+                "() => ({w: window.innerWidth, h: window.innerHeight})"
+            )
+            if not (0 <= x <= vp["w"] and 0 <= y <= vp["h"]):
+                self.logger.warning(f"AI 返回的坐标越界（{x:.0f},{y:.0f}），忽略")
+                return False, ""
+            await self.browser.page.mouse.move(x, y, steps=8)
+            await self.browser.wait_timeout(120)
+            await self.browser.page.mouse.click(x, y)
+            return True, f"AI 整屏定位点击（{x:.0f}, {y:.0f}）"
+        except Exception as e:
+            self.logger.warning(f"AI 整屏定位验证控件失败: {e}")
+            return False, ""
+
     async def _try_click(self, allow_ai: bool = True) -> tuple[bool, str]:
         """尝试处理"需要点击"的验证控件。
 
@@ -919,6 +961,19 @@ class CFHandler:
                     continue
 
             if not acted:
+                # 4) 完全定位不到控件：新版 CF 把 Turnstile 渲染在闭合 shadow DOM 里，
+                #    选择器和 page.frames 都看不见 → 整屏截图让 AI 视觉定位并点击
+                if clicks < self.MAX_CLICKS and (now - last_ai) >= self.AI_INTERVAL:
+                    last_ai = time.monotonic()
+                    clicked, method = await self._ai_click_viewport()
+                    if clicked:
+                        clicks += 1
+                        last_click = time.monotonic()
+                        self.logger.info(
+                            f"[CF {elapsed:.0f}s] 已点击验证控件（{method}，第 {clicks} 次）"
+                        )
+                        await self.browser.wait_timeout(1500)
+                        continue
                 self.logger.info(
                     f"[CF {elapsed:.0f}s] 仍在验证中（点击 {clicks} 次 / 滑动 {slides} 次），"
                     "继续每秒探测可交互控件"

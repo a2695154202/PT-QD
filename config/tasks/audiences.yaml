@@ -23,8 +23,17 @@ options:
   turnstile_timeout: 40         # 签到页 Turnstile 人机验证的最长等待秒数
   schedule_time: "09:30"
   # ---- 桌面模式（默认开启）----
-  # true = 用你平时那个正常浏览器打开站点，由 AI 看屏幕截图识图点击完成签到。
-  #        CF 看到的是普通用户的浏览器与鼠标行为，不会触发自动化拦截。
-  # false = 退回 Playwright/CDP 自动化模式（有 CF 时较容易被拦）。
+  # 流程：CookieCloud 取 cookie → 写入「正常浏览器」profile → 判定是否仍有效
+  #       有效 → 打开正常浏览器（无调试端口，最大化 + 置顶）签到
+  #       无效 → 用「开了调试端口的 Edge」自动登录（识别验证码/2FA），
+  #              cookie 落盘到同一 profile，再打开正常浏览器签到
+  # 两个浏览器共用一个独立 profile，cookie 才共享（不要和全局 browser.user_data_dir 混用）
   desktop_mode: true
-  desktop_max_steps: 20         # 识图点击最多执行多少步（每步一张截图）
+  desktop_profile: "data/desktop_profile"   # 桌面模式专用 profile（调试/正常浏览器共用）
+  desktop_debug_port: 9223                  # 调试浏览器端口（不要和全局 9222 冲突）
+  desktop_window_title: "Audiences"         # 正常浏览器窗口标题关键字（用于最大化/置顶）
+  desktop_startup_wait: 6                   # 正常浏览器打开后等页面渲染的秒数
+  desktop_max_steps: 20                     # 识图点击最多执行多少步（每步一张截图）
+  normal_maximized: true                    # 正常浏览器最大化
+  normal_topmost: true                      # 正常浏览器置顶（始终显示在最前）
+  keep_normal_open: false                   # 签到后是否保留正常浏览器窗口
