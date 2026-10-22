@@ -303,10 +303,24 @@ class PTKongTask(BaseTask):
                     await browser.fill(self.SEL_ONECODE, code)
                     self.log(f"已填入 2FA 验证码（{code}，剩余 {self.ctx.totp.remaining()}s 有效）")
 
-                # AI 识别登录验证码
-                await self.ctx.captcha.solve_and_fill(
-                    self.SEL_CAPTCHA_IMG, self.SEL_CAPTCHA_INPUT, prompt_key="captcha"
-                )
+                # AI 识别登录验证码（识别不出来就不提交，避免空验证码必然失败）
+                has_img = False
+                try:
+                    has_img = await browser.page.query_selector(self.SEL_CAPTCHA_IMG) is not None
+                except Exception:
+                    has_img = False
+                if has_img:
+                    try:
+                        await self.ctx.captcha.solve_and_fill(
+                            self.SEL_CAPTCHA_IMG, self.SEL_CAPTCHA_INPUT, prompt_key="captcha"
+                        )
+                    except Exception as e:
+                        self.logger.warning(
+                            f"登录图形验证码识别失败，本次不提交登录（{e}）。"
+                            "请检查 AI 接口是否可用")
+                        await self.open_site()
+                        await browser.wait_timeout(1000)
+                        continue
 
                 await browser.click(self.SEL_SUBMIT)
                 await browser.wait_timeout(3000)  # 等待跳转/响应

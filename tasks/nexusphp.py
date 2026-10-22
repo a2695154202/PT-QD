@@ -262,13 +262,25 @@ class NexusPHPTask(BaseTask):
                         self.log("当前登录页没有 2FA 输入框，跳过 2FA 填写")
 
                 if self.SEL_CAPTCHA_IMG:
+                    has_img = False
                     try:
-                        if await browser.page.query_selector(self.SEL_CAPTCHA_IMG):
+                        has_img = await browser.page.query_selector(self.SEL_CAPTCHA_IMG) is not None
+                    except Exception:
+                        has_img = False
+                    if has_img:
+                        try:
                             await self.ctx.captcha.solve_and_fill(
                                 self.SEL_CAPTCHA_IMG, self.SEL_CAPTCHA_INPUT, prompt_key="captcha"
                             )
-                    except Exception as e:
-                        self.logger.warning(f"登录图形验证码处理失败: {e}")
+                        except Exception as e:
+                            # 识别不出来就**不提交**：空验证码必然失败，
+                            # 而且会白白消耗一次登录机会（这属于 AI/识别问题，不计入失败次数）
+                            self.logger.warning(
+                                f"登录图形验证码识别失败，本次不提交登录（{e}）。"
+                                "请检查 AI 接口是否可用")
+                            await self.open_site()
+                            await browser.wait_timeout(1000)
+                            continue
 
                 await browser.click(self.SEL_SUBMIT)
                 await browser.wait_timeout(3000)
