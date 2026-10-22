@@ -122,6 +122,41 @@ def last_time(task_id: str) -> str:
     return str(load_state().get(task_id, {}).get("time", ""))
 
 
+# ---------------- 定时运行标记（每天最多自动跑一次） ----------------
+SCHEDULE_KEY = "_schedule"
+
+
+def schedule_last_run() -> str:
+    """最近一次定时运行触发的日期（YYYY-MM-DD），没有则空串"""
+    raw = load_state().get(SCHEDULE_KEY)
+    if isinstance(raw, dict):
+        return str(raw.get("last_run", "") or "")
+    return ""
+
+
+def schedule_info() -> dict[str, Any]:
+    raw = load_state().get(SCHEDULE_KEY)
+    return raw if isinstance(raw, dict) else {}
+
+
+def set_schedule_last_run(date_str: str = "", note: str = "") -> None:
+    """记录定时运行已触发（默认记为今天）"""
+    state = load_state()
+    state[SCHEDULE_KEY] = {
+        "last_run": date_str or today_str(),
+        "time": _now(),
+        "note": (note or "")[:200],
+    }
+    save_state(state)
+
+
+def clear_schedule_last_run() -> None:
+    """清掉标记（下次到点还能再跑一次）"""
+    state = load_state()
+    state.pop(SCHEDULE_KEY, None)
+    save_state(state)
+
+
 # ---------------- 登录失败计数（跨天累计，只有登录成功才清零） ----------------
 def login_fail_info(task_id: str) -> dict[str, Any]:
     """返回 {"count": int, "limit": int, "time": str, "reason": str}"""

@@ -13,12 +13,15 @@ import asyncio
 import logging
 import threading
 import tkinter as tk
+from datetime import datetime
 from tkinter import filedialog, messagebox, ttk
 
 from core.config import AppConfig, load_task_configs
 from core.logger import get_logger
+from core.scheduler import describe, normalize_hhmm, should_run
 from core.state import (is_signed, login_fail_info, load_state, record_date,
-                        reset_all_login_fail, reset_login_fail, today_str)
+                        reset_all_login_fail, reset_login_fail, schedule_last_run,
+                        set_schedule_last_run, today_str)
 from core.twofa_store import TwoFactorVault
 from tasks.manager import TaskManager
 
@@ -384,6 +387,37 @@ class SettingsDialog(tk.Toplevel):
                   foreground="gray", font=("", 8), justify="left").grid(
             row=5, column=0, columnspan=2, sticky="w", **pad)
 
+        # --- 定时 ---
+        tab_sc = ttk.Frame(nb, padding=8)
+        nb.add(tab_sc, text="定时运行")
+        self.sc_enabled = tk.BooleanVar()
+        self.sc_time = tk.StringVar()
+        self.sc_skip_signed = tk.BooleanVar()
+        self.sc_catch_up = tk.BooleanVar()
+        ttk.Checkbutton(tab_sc, text="启用每日定时运行（程序开着时到点自动签到）",
+                        variable=self.sc_enabled).grid(
+            row=0, column=0, columnspan=2, sticky="w", **pad)
+        ttk.Label(tab_sc, text="每天运行时间").grid(row=1, column=0, sticky="w", **pad)
+        time_row = ttk.Frame(tab_sc)
+        time_row.grid(row=1, column=1, sticky="w", **pad)
+        ttk.Entry(time_row, textvariable=self.sc_time, width=8).pack(side="left")
+        ttk.Label(time_row, text="（24 小时制，如 09:30、21:05）",
+                  foreground="gray", font=("", 8)).pack(side="left", padx=6)
+        ttk.Checkbutton(tab_sc, text="跳过今天已经签到的任务",
+                        variable=self.sc_skip_signed).grid(
+            row=2, column=0, columnspan=2, sticky="w", **pad)
+        ttk.Checkbutton(tab_sc, text="错过时间点也补跑（例如 10 点才打开程序，仍会跑一次当天）",
+                        variable=self.sc_catch_up).grid(
+            row=3, column=0, columnspan=2, sticky="w", **pad)
+        ttk.Label(tab_sc,
+                  text="说明：\n"
+                       "· 触发范围＝「启用」的任务；勾选「跳过今天已经签到的任务」可避免白跑。\n"
+                       "· 每天只自动跑一次；跑完会在状态栏显示下次运行时间。\n"
+                       "· 程序需要保持打开（可最小化）；关掉程序就不会触发。\n"
+                       "· 手动点「▶ 运行选中 / 运行全部启用」不受定时设置影响。",
+                  foreground="gray", font=("", 8), justify="left").grid(
+            row=4, column=0, columnspan=2, sticky="w", **pad)
+
         btns = ttk.Frame(self)
         btns.pack(fill="x", padx=8, pady=(0, 8))
         ttk.Button(btns, text="保存", command=self._save).pack(side="right", padx=4)
@@ -414,6 +448,10 @@ class SettingsDialog(tk.Toplevel):
         self.px_server.set(c.proxy.server)
         self.px_user.set(c.proxy.username)
         self.px_pass.set(c.proxy.password)
+        self.sc_enabled.set(bool(getattr(c, "schedule", None) and c.schedule.enabled))
+        self.sc_time.set(getattr(getattr(c, "schedule", None), "time", "09:30") or "09:30")
+        self.sc_skip_signed.set(bool(getattr(getattr(c, "schedule", None), "skip_signed", True)))
+        self.sc_catch_up.set(bool(getattr(getattr(c, "schedule", None), "catch_up", True)))
 
     def _save(self):
         c = self.cfg
@@ -438,6 +476,17 @@ class SettingsDialog(tk.Toplevel):
         c.proxy.server = self.px_server.get().strip()
         c.proxy.username = self.px_user.get().strip()
         c.proxy.password = self.px_pass.get()
+        # 定时运行：启用时必须填合法时间（HH:MM）
+        sc_time = normalize_hhmm(self.sc_time.get(), default="")
+        if not sc_time:
+            if self.sc_enabled.get():
+                messagebox.showerror("时间格式不对", "每天运行时间请填 HH:MM，例如 09:30")
+                return
+            sc_time = "09:30"
+        c.schedule.enabled = bool(self.sc_enabled.get())
+        c.schedule.time = sc_time
+        c.schedule.skip_signed = bool(self.sc_skip_signed.get())
+        c.schedule.catch_up = bool(self.sc_catch_up.get())
         try:
             c.browser.debugging_port = int(self.br_port.get() or 9222)
             c.browser.slow_mo = int(self.br_slow.get() or 50)
@@ -464,6 +513,7 @@ class SigninApp:
         self._day = today_str()
         self._build()
         self.root.after(30000, self._watch_day)
+        self.root.after(5000, self._schedule_tick)
 
     def _watch_day(self):
         """跨天自动刷新：界面开着过夜也能把「已签到」变成「未签到」"""
@@ -476,6 +526,59 @@ class SigninApp:
             self.root.after(30000, self._watch_day)
         except tk.TclError:
             pass          # 窗口已关闭
+
+    # ---------- 每日定时运行 ----------
+    def _schedule_tick(self):
+        """每 20 秒检查一次是否到了定时运行时间"""
+        try:
+            self._update_schedule_label()
+            if not self._running and self._scheduled_due():
+                self._run_scheduled()
+            self.root.after(20000, self._schedule_tick)
+        except tk.TclError:
+            pass          # 窗口已关闭
+
+    def _scheduled_due(self) -> bool:
+        try:
+            sc = AppConfig.load().schedule
+        except Exception as e:
+            LOGGER.warning(f"读取定时配置失败: {e}")
+            return False
+        if not sc.enabled:
+            return False
+        return should_run(datetime.now(), sc.time, schedule_last_run(), sc.catch_up)
+
+    def _run_scheduled(self):
+        """到点触发：跑「启用」的任务，可按配置跳过今天已签到的"""
+        try:
+            sc = AppConfig.load().schedule
+        except Exception as e:
+            LOGGER.error(f"定时运行读取配置失败: {e}")
+            return
+        ids = [c.id for c in load_task_configs() if c.enabled]
+        if sc.skip_signed:
+            ids = [tid for tid in ids if not is_signed(tid)]
+        # 无论有没有任务，都标记今天已触发，避免每 20 秒重复判断
+        set_schedule_last_run(note=f"定时 {sc.time}，待跑 {len(ids)} 个任务")
+        if not ids:
+            LOGGER.info(f"⏰ 定时运行（{sc.time}）：今天没有需要跑的任务（都已签到），跳过")
+            self._update_schedule_label()
+            return
+        LOGGER.info(f"⏰ 定时运行触发（每天 {sc.time}）：本次 {len(ids)} 个任务 → {', '.join(ids)}")
+        self.status.set(f"定时运行中（{sc.time}）：{len(ids)} 个任务")
+        self._run_async(ids)
+
+    def _update_schedule_label(self):
+        try:
+            sc = AppConfig.load().schedule
+            text = describe(datetime.now(), sc.time, schedule_last_run(),
+                            sc.enabled, sc.catch_up)
+        except Exception:
+            text = "定时：读取配置失败"
+        try:
+            self.lbl_schedule.configure(text=text)
+        except Exception:
+            pass
 
     # ---------- UI ----------
     def _build(self):
@@ -513,7 +616,13 @@ class SigninApp:
         paned.add(right, weight=6)
 
         self.status = tk.StringVar(value="就绪")
-        ttk.Label(self.root, textvariable=self.status, relief="sunken", anchor="w", padding=4).pack(fill="x")
+        bar = ttk.Frame(self.root, relief="sunken")
+        bar.pack(fill="x", side="bottom")
+        ttk.Label(bar, textvariable=self.status, anchor="w", padding=4).pack(
+            side="left", fill="x", expand=True)
+        self.lbl_schedule = ttk.Label(bar, text="定时：未启用", anchor="e", padding=4,
+                                      foreground="gray")
+        self.lbl_schedule.pack(side="right")
 
         handler = TextHandler(self.log_text)
         LOGGER.addHandler(handler)
@@ -598,7 +707,11 @@ class SigninApp:
         self.refresh_tasks()
 
     def open_settings(self):
-        SettingsDialog(self.root, on_saved=self.refresh_tasks)
+        SettingsDialog(self.root, on_saved=self._after_settings_saved)
+
+    def _after_settings_saved(self):
+        self.refresh_tasks()
+        self._update_schedule_label()
 
     # ---------- 运行 ----------
     def run_selected(self):

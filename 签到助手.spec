@@ -25,7 +25,7 @@ datas += collect_dynamic_libs("pyzbar")
 hiddenimports = [
     "core.browser", "core.ai", "core.captcha", "core.slider", "core.cf",
     "core.cookiecloud", "core.totp", "core.twofa_store", "core.events",
-    "core.config", "core.logger",
+    "core.config", "core.logger", "core.state", "core.scheduler", "core.captcha",
     "tasks.base", "tasks.manager", "tasks.nexusphp",
     "tasks.pt_kong", "tasks.hddolby", "tasks.ttg", "tasks.mteam", "tasks.audiences",
     "tasks.akile", "tasks.hhan",

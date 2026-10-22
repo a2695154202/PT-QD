@@ -47,3 +47,9 @@ proxy:
 logging:
   level: INFO
   file: data/logs/app.log
+schedule:
+  # 每日定时运行：到点自动跑一遍「启用」的任务（程序需保持打开）
+  enabled: false
+  time: '09:30'          # HH:MM，24 小时制
+  skip_signed: true      # 跳过今天已签到的任务
+  catch_up: true         # 错过时间点（程序后开）也补跑当天一次

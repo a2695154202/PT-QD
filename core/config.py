@@ -146,11 +146,25 @@ class ProxyConfig:
 
 
 @dataclass
+class ScheduleConfig:
+    """每日定时运行：到点自动跑一遍启用中的任务"""
+    enabled: bool = False
+    time: str = "09:30"                     # 每天运行时间 HH:MM（24 小时制）
+    skip_signed: bool = True                # 今天已签到的任务不再跑
+    catch_up: bool = True                   # 错过时间点（程序后开）也补跑当天一次
+
+    def is_valid_time(self) -> bool:
+        from .scheduler import parse_hhmm
+        return parse_hhmm(self.time) is not None
+
+
+@dataclass
 class AppConfig:
     browser: BrowserConfig = field(default_factory=BrowserConfig)
     ai: AIConfig = field(default_factory=AIConfig)
     cookiecloud: CookieCloudConfig = field(default_factory=CookieCloudConfig)
     proxy: ProxyConfig = field(default_factory=ProxyConfig)
+    schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
     log_level: str = "INFO"
     log_file: str = "data/logs/app.log"
 
@@ -165,7 +179,8 @@ class AppConfig:
         cfg.log_level = data.get("logging", {}).get("level", cfg.log_level)
         cfg.log_file = data.get("logging", {}).get("file", cfg.log_file)
         for key, dc in (("browser", BrowserConfig), ("ai", AIConfig),
-                        ("cookiecloud", CookieCloudConfig), ("proxy", ProxyConfig)):
+                        ("cookiecloud", CookieCloudConfig), ("proxy", ProxyConfig),
+                        ("schedule", ScheduleConfig)):
             section = data.get(key, {}) or {}
             current = getattr(cfg, key)
             merged = {}
@@ -183,6 +198,8 @@ class AppConfig:
             "cookiecloud": {f.name: getattr(self.cookiecloud, f.name)
                             for f in CookieCloudConfig.__dataclass_fields__.values()},
             "proxy": {f.name: getattr(self.proxy, f.name) for f in ProxyConfig.__dataclass_fields__.values()},
+            "schedule": {f.name: getattr(self.schedule, f.name)
+                         for f in ScheduleConfig.__dataclass_fields__.values()},
             "logging": {"level": self.log_level, "file": self.log_file},
         }
         header = (
@@ -192,6 +209,8 @@ class AppConfig:
             "# ai: 任意 OpenAI 兼容接口；识别验证码需支持视觉的模型\n"
             "# cookiecloud.mode: overwrite=拉取并覆盖到浏览器 / paused=暂停同步\n"
             "# proxy: 全局代理；任务配置里勾选「走代理」的任务才使用它，未勾选的任务强制直连\n"
+            "# schedule: 每日定时运行（time 为 HH:MM）；skip_signed=跳过今天已签到的任务；\n"
+            "#           catch_up=错过时间点（程序后开）也补跑当天一次\n"
             "# logging: 日志级别与全局日志文件\n"
         )
         with open(path, "w", encoding="utf-8") as f:
