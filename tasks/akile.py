@@ -351,6 +351,61 @@ class AkileTask(BaseTask):
         except Exception as e:
             self.logger.warning(f"跳过 Passkey 提示失败: {e}")
 
+    async def _dismiss_announcement(self) -> None:
+        """关闭控制台的「公告详情」弹窗（会挡住「每日签到」按钮）。
+
+        Arco Design 弹窗：div.arco-modal + 标题 .arco-modal-title（公告详情 / 公告消息），
+        右上角关闭按钮 .arco-modal-close-btn。没有公告时不做任何操作。
+        """
+        page = self.ctx.browser.page
+        for _ in range(3):                     # 最多连关 3 个公告
+            modal = await self._find_announcement_modal()
+            if modal is None:
+                return
+            try:
+                self.log("检测到公告弹窗，先关闭再签到")
+                closed = False
+                for sel in (".arco-modal-close-btn", ".arco-icon-close",
+                            "button:has-text('关闭')"):
+                    loc = modal.locator(sel).first
+                    if await loc.count() and await loc.is_visible():
+                        await loc.click()
+                        closed = True
+                        break
+                if not closed:
+                    await page.keyboard.press("Escape")   # Arco 弹窗默认支持 Esc 关闭
+                await self.ctx.browser.wait_timeout(1200)
+            except Exception as e:
+                self.logger.warning(f"关闭公告弹窗失败: {e}")
+                return
+
+    async def _find_announcement_modal(self):
+        """返回可见的公告弹窗 locator，没有则 None"""
+        page = self.ctx.browser.page
+        try:
+            modals = page.locator("div.arco-modal")
+            count = await modals.count()
+        except Exception:
+            return None
+        for i in range(count):
+            modal = modals.nth(i)
+            try:
+                if not await modal.is_visible():
+                    continue
+                title = ""
+                t = modal.locator(".arco-modal-title").first
+                if await t.count():
+                    title = (await t.inner_text() or "").strip()
+                if "公告" in title:
+                    return modal
+                if not title:                  # 没有标题栏时看弹窗开头文本
+                    head = ((await modal.inner_text()) or "").strip()[:30]
+                    if "公告" in head:
+                        return modal
+            except Exception:
+                continue
+        return None
+
     # ---------- 签到 ----------
     @staticmethod
     def _has_kw(text: str, keywords) -> bool:
@@ -377,6 +432,15 @@ class AkileTask(BaseTask):
                 continue
         return ""
 
+    async def _click_checkin(self, btn_sel: str) -> bool:
+        """点击签到按钮；被弹窗挡住时不要干等 Playwright 默认的 30 秒超时"""
+        try:
+            await self.ctx.browser.page.locator(btn_sel).first.click(timeout=6000)
+            return True
+        except Exception as e:
+            self.logger.warning(f"点击签到按钮未成功: {e}")
+            return False
+
     async def do_checkin(self) -> tuple[bool, str]:
         browser = self.ctx.browser
         url = (self.cfg.options.get("checkin_url") or self.CHECKIN_URL).strip()
@@ -384,6 +448,8 @@ class AkileTask(BaseTask):
         await browser.goto(url)
         await browser.wait_timeout(3000)     # SPA 渲染
         await self.handle_challenge_if_any()
+        # 控制台可能弹「公告详情」，挡住「每日签到」按钮 → 先关掉；没公告则跳过
+        await self._dismiss_announcement()
 
         body = await self.page_text()
         if self._has_kw(body, self.ALREADY_KEYWORDS):
@@ -400,7 +466,13 @@ class AkileTask(BaseTask):
             return False, "未找到签到按钮（可在任务配置 checkin_btn 指定选择器）"
 
         self.log(f"找到签到按钮: {btn_sel}")
-        await browser.click(btn_sel)
+        clicked = await self._click_checkin(btn_sel)
+        if not clicked:
+            # 多半是又有弹窗挡住了：关掉公告/弹窗后再点一次
+            await self._dismiss_announcement()
+            clicked = await self._click_checkin(btn_sel)
+        if not clicked:
+            return False, "点击「每日签到」被弹窗挡住（关闭弹窗后仍无法点击）"
         self.events.emit(Events.CHECKIN_CLICKED, task_id=self.id)
         self.log("已点击「每日签到」，等待结果")
         await browser.wait_timeout(2500)

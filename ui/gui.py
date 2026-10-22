@@ -25,6 +25,15 @@ from tasks.manager import TaskManager
 LOGGER = get_logger()
 
 
+def _short_msg(text: str, limit: int = 42) -> str:
+    """任务结果只取首行并截断，避免 Playwright Call log 之类的长文本把界面撑爆"""
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    line = " ".join(raw.splitlines()[0].split())     # 首行 + 压掉多余空白
+    return line if len(line) <= limit else line[:limit] + "…"
+
+
 class TextHandler(logging.Handler):
     """把日志输出到 Tk Text 控件（线程安全）"""
 
@@ -523,14 +532,14 @@ class SigninApp:
             ttk.Label(self.task_frame, text="config/tasks/ 下没有任务配置").pack(anchor="w")
             return
         for cfg in configs:
-            var = tk.BooleanVar(value=cfg.enabled)
-            self.checks[cfg.id] = var
-            row = ttk.Frame(self.task_frame)
-            row.pack(fill="x", pady=3)
-            # 只有「今天的记录且成功」才算已签到；昨天的成功跨天后显示为未签到
             info = st.get(cfg.id, {})
             rec_date = record_date(cfg.id)
             label = "已签到" if is_signed(cfg.id) else "未签到"
+            # 已签到的默认不勾选（打开程序 / 刷新任务都是），避免白跑一遍
+            var = tk.BooleanVar(value=cfg.enabled and label == "未签到")
+            self.checks[cfg.id] = var
+            row = ttk.Frame(self.task_frame)
+            row.pack(fill="x", pady=3)
             ttk.Checkbutton(row, text=f"{cfg.name}({label})",
                             variable=var).pack(side="left")
             ttk.Button(row, text="配置", width=6,
@@ -552,7 +561,7 @@ class SigninApp:
             if info.get("time"):
                 # 昨天的记录标注为「上次」，避免被当成今天的签到结果
                 prefix = "上次" if rec_date != today_str() else "今天"
-                ttk.Label(row, text=f"{prefix}: {info['time']}  {info.get('message', '')}",
+                ttk.Label(row, text=f"{prefix}: {info['time']}  {_short_msg(info.get('message', ''))}",
                           foreground="gray").pack(side="left")
         # 2FA 凭证库概览
         try:
