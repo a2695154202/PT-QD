@@ -12,7 +12,7 @@
 | AI 能力（用户配置） | OpenAI 兼容接口；验证码识别、滑块缺口定位、CF 挑战主动点击；事件驱动「主动触发」 |
 | CookieCloud | 输入服务器/UUID/密钥，本地 AES 解密同步 cookie；工作模式：**覆盖到浏览器 / 暂停同步**，默认同步全部站点；**在打开站点之前就把 cookie 注入浏览器** |
 | 代理 | 全局设置代理地址（http/socks5 + 可选账号密码）；任务配置里勾选「本任务走代理」才使用，未勾选的任务强制直连 |
-| 签到任务 | 任务基类 + 注册表 + YAML 配置；任务可单独勾选是否有 2FA / CF 验证 / 走代理。内置 **PT-空（site-a.example）**、**HDDolby（site-b.example）**、**TTG 听听歌（site-c.example）**、**馒头 M-Team（site-d.example）**、**人人 Audiences（site-e.example）** |
+| 签到任务 | 任务基类 + 注册表 + YAML 配置；任务可单独勾选是否有 2FA / CF 验证 / 走代理。内置 **PT-空（site-a.example）**、**HDDolby（site-b.example）**、**TTG 听听歌（site-c.example）**、**馒头 M-Team（site-d.example）**、**人人 Audiences（site-e.example）**、**Akile（site-f.example，控制台「每日签到」）** |
 | 任务队列 | 严格串行：一个任务跑完再跑下一个；队列全部结束后才关闭浏览器（任务之间浏览器保持运行）
 | 运行日志 | 每次运行单独写入 `data/logs/run_日期_时间.log`；运行结束自动关闭浏览器 |
 | 设置持久化 | 所有设置保存到本地 YAML，启动自动载入；图形界面内即可编辑保存 |
@@ -45,14 +45,16 @@ python main.py run pt_kong  # 命令行运行任务
 ## 图形界面
 
 - **任务列表**：每行一个任务，勾选框决定本次运行哪些；点「配置」打开任务配置对话框
-  - 任务名后括号里显示上次运行结果：`任务名称(已签到)` / `人人(未签到)`
-  - 结果记录在 `data/task_state.json`，每次运行后自动更新
+  - 任务名后括号里显示**今天**是否已签到：`任务名称(已签到)` / `人人(未签到)`
+    —— 昨天的签到结果今天会自动变回「未签到」；记录行用「今天: …」/「上次: …」区分
+  - 结果记录在 `data/task_state.json`，每次运行后自动更新；跨天时界面自动刷新
 - **任务配置**（保存到 `config/tasks/*.yaml`，底部固定「保存配置」按钮）：
   - 账号 / 密码（CookieCloud 失效时兜底登录）
   - ☑ **本任务有 2FA** → 可下拉选择绑定 2FA 凭证库中的哪个账号，或直接填 secret
   - ☑ **本任务有 Cloudflare / 人机验证** → 勾选后才处理挑战，未勾选完全不处理
   - ☑ **本任务走代理** → 使用「全局设置 → 代理」的地址；未勾选则本任务强制直连
-  - 登录失败重试次数
+  - 登录失败次数上限：**跨天累计**，只有登录成功才清零；用尽后该任务不再执行
+    （界面显示「登录已锁定 x/y」，可点「重置登录失败次数」手动解锁）
 - **全局设置**（保存到 `config/config.yaml`）：AI 接口、CookieCloud（含工作模式）、代理、
   浏览器模式/端口/无头、**启动后全屏**、**窗口置顶**
 - **导入2FA二维码**：选择二维码图片 → 解析入凭证库 → 在任务配置里选择绑定
@@ -140,6 +142,7 @@ options:
 │   ├── totp.py              # TOTP + 二维码解析（含 otpauth-migration protobuf）
 │   ├── twofa_store.py       # 2FA 凭证库（多账号、按任务绑定）
 │   ├── events.py            # 事件总线
+│   ├── state.py             # 任务状态（今日是否已签到 + 登录失败次数，跨天累计）
 │   ├── config.py            # 配置加载/保存（frozen 时以 exe 目录为根）
 │   └── logger.py            # 日志（控制台 + 全局 + 每次运行独立文件）
 ├── tasks/
@@ -150,7 +153,8 @@ options:
 │   ├── hddolby.py           # HDDolby 任务实现（继承 NexusPHP 基类）
 │   ├── ttg.py               # TTG 听听歌任务实现（多语言表单 + JS 签到）
 │   ├── mteam.py             # 馒头 M-Team 任务实现（React 单页应用 + 2FA + 保活）
-│   └── audiences.py         # 人人 Audiences 任务（默认桌面模式：正常浏览器 + 识图点击；可退自动化）
+│   ├── audiences.py         # 人人 Audiences 任务（默认桌面模式：正常浏览器 + 识图点击；可退自动化）
+│   └── akile.py             # Akile 任务（Vue 单页应用：登录 + 验证器 2FA + 控制台「每日签到」）
 ├── ui/gui.py                # Tkinter 界面（主窗口 + 任务配置 + 全局设置）
 └── data/                    # 运行时生成：Edge profile、截图、日志
 ```

@@ -28,6 +28,7 @@ hiddenimports = [
     "core.config", "core.logger",
     "tasks.base", "tasks.manager", "tasks.nexusphp",
     "tasks.pt_kong", "tasks.hddolby", "tasks.ttg", "tasks.mteam", "tasks.audiences",
+    "tasks.akile",
     "ui.gui",
     "cryptography.hazmat.primitives.ciphers",
     "cryptography.hazmat.primitives.padding",

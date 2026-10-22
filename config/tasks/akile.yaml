@@ -1,0 +1,25 @@
+# ============ Akile（AkileCloud）每日签到任务配置 ============
+# 流程：首页右上角「登录」→ 邮箱密码登录 → 谷歌验证器(2FA) 弹窗填 6 位码点「继续」
+#      → 进入 https://site-f.example/console → 点「每日签到」按钮
+task:
+  id: akile
+  name: "Akile（AkileCloud）"
+  enabled: true
+  url: "https://site-f.example/"
+
+account:
+  username: ""                  # 请填写登录邮箱（站点用邮箱登录）
+  password: ""                  # 请填写登录密码
+  two_step:
+    enabled: true               # 登录需要谷歌验证器 6 位码
+    secret: ""                  # 直接填 base32 密钥（可选，填了优先用它）
+    vault_key: ""               # 留空则按站点域名自动匹配凭证库
+
+options:
+  has_2fa: true                 # 登录弹「使用验证器应用验证身份」
+  has_cf: false                 # 站点在 Cloudflare 后面，但实测未出挑战；如遇到可改为 true
+  use_proxy: false
+  max_login_retry: 2            # 登录失败次数上限（跨天累计，只有登录成功才清零）
+  checkin_url: "https://site-f.example/console"
+  checkin_btn: ""               # 留空自动探测 .dashboard-checkin-pill（「每日签到」按钮）
+  schedule_time: "09:30"

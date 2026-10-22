@@ -45,6 +45,7 @@ KNOWN_TASKS = (
     "tasks.ttg",
     "tasks.mteam",
     "tasks.audiences",
+    "tasks.akile",
 )
 
 
