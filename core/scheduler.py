@@ -81,6 +81,37 @@ def next_run_at(now: datetime, hhmm: str, last_run_date: str = "") -> Optional[d
     return target + timedelta(days=1)
 
 
+def normalize_tasks(value) -> list[str]:
+    """把配置里的 tasks 规整成 id 列表。
+
+    手改 YAML 时可能写成 `tasks: akile`（字符串）或 `tasks: akile,hhan`，
+    直接迭代字符串会按字符拆开 → 这里统一处理。
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return []
+        sep = "," if "," in raw else (" " if " " in raw else "\n")
+        parts = raw.replace("，", ",").split(sep)
+    elif isinstance(value, (list, tuple, set)):
+        parts = []
+        for v in value:
+            if isinstance(v, str) and ("," in v or "，" in v):
+                parts.extend(v.replace("，", ",").split(","))
+            else:
+                parts.append(v)
+    else:
+        return []
+    out: list[str] = []
+    for p in parts:
+        tid = str(p or "").strip()
+        if tid and tid not in out:
+            out.append(tid)
+    return out
+
+
 def pick_scheduled(selected, available) -> tuple[list[str], list[str]]:
     """决定定时运行要跑哪些任务。
 
@@ -90,7 +121,7 @@ def pick_scheduled(selected, available) -> tuple[list[str], list[str]]:
 
     返回 (要跑的 id 列表, 被跳过的说明列表)
     """
-    picked = [str(s) for s in (selected or []) if str(s or "").strip()]
+    picked = normalize_tasks(selected)
     if not picked:
         return [tid for tid, enabled in available if enabled], []
     enabled_map = {tid: bool(enabled) for tid, enabled in available}

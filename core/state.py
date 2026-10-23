@@ -27,12 +27,20 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime
 from typing import Any, Optional
 
 from .config import DATA_DIR
 
 STATE_PATH = DATA_DIR / "task_state.json"
+
+# 「读-改-写」必须串行：任务在后台线程写结果，界面主线程也会写定时标记，
+# 并发时后写的一方会覆盖前一方（丢记录）。
+_LOCK = threading.RLock()
+
+# 状态文件里留给程序自己的键（不当作任务）
+RESERVED_KEYS = ("_schedule",)
 
 # 登录失败计数在 task_state.json 里的字段名
 LOGIN_FAIL_KEY = "login_fail"
@@ -87,12 +95,14 @@ def record_result(task_id: str, success: bool, message: str) -> None:
     **合并写**：只更新 signed/time/message，保留 login_fail 等其它字段，
     否则每次签到都会把登录失败计数顺手清掉。
     """
-    state = load_state()
-    ent = _entry(state, task_id)
-    ent["signed"] = bool(success)
-    ent["time"] = _now()
-    ent["message"] = message or ""
-    save_state(state)
+    with _LOCK:
+        state = load_state()
+        ent = _entry(state, task_id)
+        ent["signed"] = bool(success)
+        ent["time"] = _now()
+        # 截断超长报错（Playwright Call log 可能上万字），避免状态文件无限膨胀
+        ent["message"] = (message or "")[:600]
+        save_state(state)
 
 
 def is_signed(task_id: str) -> bool:
@@ -141,20 +151,22 @@ def schedule_info() -> dict[str, Any]:
 
 def set_schedule_last_run(date_str: str = "", note: str = "") -> None:
     """记录定时运行已触发（默认记为今天）"""
-    state = load_state()
-    state[SCHEDULE_KEY] = {
-        "last_run": date_str or today_str(),
-        "time": _now(),
-        "note": (note or "")[:200],
-    }
-    save_state(state)
+    with _LOCK:
+        state = load_state()
+        state[SCHEDULE_KEY] = {
+            "last_run": date_str or today_str(),
+            "time": _now(),
+            "note": (note or "")[:200],
+        }
+        save_state(state)
 
 
 def clear_schedule_last_run() -> None:
     """清掉标记（下次到点还能再跑一次）"""
-    state = load_state()
-    state.pop(SCHEDULE_KEY, None)
-    save_state(state)
+    with _LOCK:
+        state = load_state()
+        state.pop(SCHEDULE_KEY, None)
+        save_state(state)
 
 
 # ---------------- 登录失败计数（跨天累计，只有登录成功才清零） ----------------
@@ -184,39 +196,47 @@ def login_fail_count(task_id: str) -> int:
 
 def bump_login_fail(task_id: str, reason: str = "", limit: Optional[int] = None) -> int:
     """登录失败一次：计数 +1 并落盘（不按日期重置），返回累加后的次数。"""
-    state = load_state()
-    ent = _entry(state, task_id)
-    info = login_fail_info(task_id)
-    count = info["count"] + 1
-    ent[LOGIN_FAIL_KEY] = {
-        "count": count,
-        "limit": int(limit) if limit is not None else int(info["limit"]),
-        "time": _now(),
-        "reason": (reason or "")[:200],
-    }
-    save_state(state)
-    return count
+    with _LOCK:
+        state = load_state()
+        ent = _entry(state, task_id)
+        raw = ent.get(LOGIN_FAIL_KEY)
+        prev_count = int(raw.get("count", 0) or 0) if isinstance(raw, dict) else (
+            int(raw) if isinstance(raw, int) else 0)
+        prev_limit = int(raw.get("limit", 0) or 0) if isinstance(raw, dict) else 0
+        count = max(0, prev_count) + 1
+        ent[LOGIN_FAIL_KEY] = {
+            "count": count,
+            "limit": int(limit) if limit is not None else int(prev_limit),
+            "time": _now(),
+            "reason": (reason or "")[:200],
+        }
+        save_state(state)
+        return count
 
 
 def reset_login_fail(task_id: str) -> None:
     """登录成功（或用户手动重置）后清零。**这是唯一的清零入口**。"""
-    state = load_state()
-    ent = _entry(state, task_id)
-    if LOGIN_FAIL_KEY in ent:
-        ent.pop(LOGIN_FAIL_KEY, None)
-    ent["login_ok_time"] = _now()
-    save_state(state)
+    with _LOCK:
+        state = load_state()
+        ent = _entry(state, task_id)
+        if LOGIN_FAIL_KEY in ent:
+            ent.pop(LOGIN_FAIL_KEY, None)
+        ent["login_ok_time"] = _now()
+        save_state(state)
 
 
 def reset_all_login_fail() -> list[str]:
     """清空所有任务的登录失败计数，返回被清零的任务 id 列表"""
-    state = load_state()
-    cleared: list[str] = []
-    for tid, ent in state.items():
-        if isinstance(ent, dict) and ent.pop(LOGIN_FAIL_KEY, None) is not None:
-            cleared.append(tid)
-    save_state(state)
-    return cleared
+    with _LOCK:
+        state = load_state()
+        cleared: list[str] = []
+        for tid, ent in state.items():
+            if tid in RESERVED_KEYS or not isinstance(ent, dict):
+                continue
+            if ent.pop(LOGIN_FAIL_KEY, None) is not None:
+                cleared.append(tid)
+        save_state(state)
+        return cleared
 
 
 def is_login_locked(task_id: str, max_retry: int) -> bool:

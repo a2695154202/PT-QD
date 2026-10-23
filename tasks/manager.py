@@ -108,6 +108,18 @@ class TaskManager:
         return None, True
 
     async def _run_one(self, task_id: str) -> TaskResult:
+        try:
+            return await self._run_one_inner(task_id)
+        except Exception as e:
+            # 单任务异常不能把整个队列带崩：记录后继续跑后面的任务
+            self.logger.exception(f"任务 [{task_id}] 执行异常（队列继续）")
+            try:
+                record_result(task_id, False, f"任务异常: {e}")
+            except Exception:
+                pass
+            return TaskResult(task_id, False, f"任务异常: {e}")
+
+    async def _run_one_inner(self, task_id: str) -> TaskResult:
         cfg = next((c for c in self.discover() if c.id == task_id), None)
         if not cfg:
             return TaskResult(task_id, False, f"任务配置不存在: {task_id}")

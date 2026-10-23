@@ -18,7 +18,8 @@ from tkinter import filedialog, messagebox, ttk
 
 from core.config import AppConfig, load_task_configs
 from core.logger import get_logger
-from core.scheduler import describe, normalize_hhmm, pick_scheduled, should_run
+from core.scheduler import (describe, normalize_hhmm, normalize_tasks,
+                            pick_scheduled, should_run)
 from core.state import (is_signed, login_fail_info, load_state, record_date,
                         reset_all_login_fail, reset_login_fail, schedule_last_run,
                         set_schedule_last_run, today_str)
@@ -518,7 +519,7 @@ class SettingsDialog(tk.Toplevel):
         self.sc_time.set(getattr(getattr(c, "schedule", None), "time", "09:30") or "09:30")
         self.sc_skip_signed.set(bool(getattr(getattr(c, "schedule", None), "skip_signed", True)))
         self.sc_catch_up.set(bool(getattr(getattr(c, "schedule", None), "catch_up", True)))
-        saved = list(getattr(getattr(c, "schedule", None), "tasks", []) or [])
+        saved = normalize_tasks(getattr(getattr(c, "schedule", None), "tasks", []))
         chosen = set(saved) if saved else set(self.sc_task_vars)   # 空=全部
         for tid, var in self.sc_task_vars.items():
             var.set(tid in chosen if chosen else True)
@@ -640,15 +641,20 @@ class SigninApp:
             LOGGER.warning(f"定时运行跳过 {note}")
         if sc.skip_signed:
             ids = [tid for tid in ids if not is_signed(tid)]
-        # 无论有没有任务，都标记今天已触发，避免每 20 秒重复判断
-        set_schedule_last_run(note=f"定时 {sc.time}，待跑 {len(ids)} 个任务")
         if not ids:
+            # 没有可跑的任务也要标记，避免每 20 秒重复判断
+            set_schedule_last_run(note=f"定时 {sc.time}，无任务可跑")
             LOGGER.info(f"⏰ 定时运行（{sc.time}）：今天没有需要跑的任务（未选中或都已签到），跳过")
             self._update_schedule_label()
             return
         LOGGER.info(f"⏰ 定时运行触发（每天 {sc.time}）：本次 {len(ids)} 个任务 → {', '.join(ids)}")
         self.status.set(f"定时运行中（{sc.time}）：{len(ids)} 个任务")
-        self._run_async(ids)
+        if not self._run_async(ids, silent=True):
+            # 上一个队列还在跑：不写标记，20 秒后会再判断一次
+            LOGGER.warning("定时运行未能启动（已有任务队列在执行），稍后重试")
+            self._update_schedule_label()
+            return
+        set_schedule_last_run(note=f"定时 {sc.time}，待跑 {len(ids)} 个任务")
 
     def _update_schedule_label(self):
         try:
@@ -814,10 +820,15 @@ class SigninApp:
             return
         self._run_async(ids)
 
-    def _run_async(self, task_ids: list[str]):
+    def _run_async(self, task_ids: list[str], silent: bool = False) -> bool:
+        """启动一个后台线程跑队列；已有队列在执行时返回 False。
+
+        silent=True（定时触发）时不再弹模态框，避免打断用户操作。
+        """
         if self._running:
-            messagebox.showinfo("提示", "任务队列正在执行中，请等待当前队列完成")
-            return
+            if not silent:
+                messagebox.showinfo("提示", "任务队列正在执行中，请等待当前队列完成")
+            return False
         self._running = True
         self._set_running_ui(True)
         self.status.set(f"队列执行中（共 {len(task_ids)} 个任务，串行执行）...")
@@ -845,9 +856,19 @@ class SigninApp:
                 err_text = f"运行失败: {e}"
                 self.root.after(0, lambda t=err_text: self.status.set(t))
             finally:
-                self.root.after(0, lambda: self._set_running_ui(False))
+                self.root.after(0, self._after_run_done)
 
         threading.Thread(target=worker, daemon=True).start()
+        return True
+
+    def _after_run_done(self):
+        """一次运行（手动或定时）结束后：恢复按钮 + 刷新任务列表与定时状态"""
+        self._set_running_ui(False)
+        try:
+            self.refresh_tasks()          # 刷新「已签到」状态与默认勾选
+        except Exception as e:
+            LOGGER.warning(f"运行结束后刷新任务列表失败: {e}")
+        self._update_schedule_label()
 
     def _set_running_ui(self, running: bool) -> None:
         """运行中的界面状态：禁用运行按钮，避免重复点击造成并发"""

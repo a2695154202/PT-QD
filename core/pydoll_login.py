@@ -177,11 +177,20 @@ class PydollLogin:
 
     # ---------- 内部步骤 ----------
     async def _wait_loaded(self, tab, wait_s: float = 6.0) -> None:
-        """CF 挑战页不触发 load 事件，这里只等一小会儿再读标题"""
+        """等页面稳定。`new_tab(url)` 已经加载过一次，除非还在空白页才再导航。
+
+        （重复 `go_to` 会让页面重新加载，验证码有可能被刷新掉，白等一轮。）
+        """
+        cur = ""
         try:
-            await asyncio.wait_for(tab.go_to(self.login_url, timeout=30), timeout=45)
-        except Exception as e:
-            self.logger.info(f"页面加载未在预期时间内完成（CF 挑战页常见）：{type(e).__name__}")
+            cur = (await tab.current_url()) or ""
+        except Exception:
+            pass
+        if not cur or cur.startswith("about:") or cur.startswith("edge://"):
+            try:
+                await asyncio.wait_for(tab.go_to(self.login_url, timeout=30), timeout=45)
+            except Exception as e:
+                self.logger.info(f"页面加载未在预期时间内完成（CF 挑战页常见）：{type(e).__name__}")
         await asyncio.sleep(wait_s)
 
     async def _has_login_form(self, tab) -> bool:
