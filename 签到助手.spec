@@ -34,6 +34,11 @@ hiddenimports = [
     "cryptography.hazmat.primitives.ciphers",
     "cryptography.hazmat.primitives.padding",
     "pyzbar.pyzbar", "pyzbar.wrapper",
+    # pydoll 的 import 写在函数内部（按需加载），必须显式声明才能打进 exe
+    "core.pydoll_login", "pydoll", "pydoll.browser",
+    "pydoll.browser.chromium", "pydoll.browser.options",
+    "pydoll.elements.web_element", "pydoll.protocol.network.types",
+    "websockets", "websockets.asyncio",
 ]
 
 a = Analysis(

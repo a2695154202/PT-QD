@@ -64,6 +64,8 @@ class AudiencesTask(NexusPHPTask):
 
     # 签到页
     CHECKIN_URL = "https://site-e.example/index.php"
+    # 登录页
+    LOGIN_URL = "https://site-e.example/index.php"
 
     # Turnstile 相关选择器
     SEL_TURNSTILE = ".cf-turnstile, iframe[src*='challenges.cloudflare.com']"
@@ -209,22 +211,28 @@ class AudiencesTask(NexusPHPTask):
 
             # ---------- 3. 无效则用调试浏览器登录 ----------
             if not logged:
-                self.log("在「开了调试端口的浏览器」打开登录页登录（识别验证码/2FA）")
-                try:
-                    logged = await self._login_in_debug_browser(bridge)
-                except TaskError as e:
-                    if self.login_locked():
-                        msg = str(e)
-                        self.log(msg)
-                        self.events.emit("task_error", task_id=self.id, error=msg)
-                        return TaskResult(self.id, False, msg)
-                    self.log(f"调试浏览器登录未成功：{e}")
-                    logged = False
+                # 3a) 优先用 pydoll 登录：直连 CDP、不设 navigator.webdriver，
+                #     实测打开本站登录页**完全不触发 CF**，能直接填账号+验证码
+                if bool(opts.get("pydoll_login", True)):
+                    logged = await self._login_with_pydoll(bridge)
+                # 3b) pydoll 不可用/失败 → 退回 Playwright 调试浏览器登录
+                if not logged:
+                    self.log("改用调试浏览器（Playwright）登录")
+                    try:
+                        logged = await self._login_in_debug_browser(bridge)
+                    except TaskError as e:
+                        if self.login_locked():
+                            msg = str(e)
+                            self.log(msg)
+                            self.events.emit("task_error", task_id=self.id, error=msg)
+                            return TaskResult(self.id, False, msg)
+                        self.log(f"调试浏览器登录未成功：{e}")
+                        logged = False
                 if logged:
                     self.log("登录成功，cookie 已落盘到正常浏览器的 profile")
-                    await asyncio.sleep(1.5)      # 等调试浏览器彻底退出、释放 profile
+                    await asyncio.sleep(1.5)      # 等浏览器彻底退出、释放 profile
                 else:
-                    self.log("登录页可能被 CF 拦住（自动化浏览器过不去）→ "
+                    self.log("两条登录路径都没成功 → "
                              "改在正常浏览器里由 AI 完成登录 + 签到")
 
             # ---------- 4. 正常浏览器打开签到页（最大化 + 置顶）----------
@@ -312,6 +320,58 @@ class AudiencesTask(NexusPHPTask):
             except Exception:
                 pass
             (self.ctx.browser, self.ctx.captcha, self.ctx.slider, self.ctx.cf) = old
+
+    async def _login_with_pydoll(self, bridge: ProfileBridge) -> bool:
+        """用 pydoll 登录（无 WebDriver 指纹）。
+
+        实测：Playwright 打开本站登录页会被 CF 托管挑战拦住，而 pydoll
+        （直连 CDP、不设 navigator.webdriver）**根本不弹 CF**，可以直接填
+        账号密码 + 图形验证码（AI 识别）。登录成功后再把 cookie 写回 profile，
+        正常浏览器打开就是登录状态。
+        """
+        if not (self.cfg.username and self.cfg.password):
+            self.log("没有填写账号密码，pydoll 登录跳过")
+            return False
+        try:
+            from core.pydoll_login import pydoll_login
+        except Exception as e:                     # pydoll 未安装时优雅降级
+            self.logger.warning(f"pydoll 不可用，跳过：{e}")
+            return False
+
+        ai = self.ctx.ai
+        if not (ai and getattr(ai, "available", False)):
+            self.log("AI 不可用，无法识别验证码，跳过 pydoll 登录")
+            return False
+
+        async def recognize(png: bytes) -> str:
+            return ai.recognize_captcha(png)
+
+        totp = ""
+        if self.cfg.has_2fa:
+            try:
+                totp = self.ctx.totp.now_code()
+            except Exception as e:
+                self.logger.warning(f"取 2FA 验证码失败: {e}")
+
+        self.log("用 pydoll 打开登录页（无 WebDriver 指纹，本站实测不触发 CF）")
+        try:
+            ok, msg, cookies = await pydoll_login(
+                bridge.profile_abs, self.LOGIN_URL,
+                self.cfg.username, self.cfg.password, recognize,
+                totp_code=totp,
+                headless=not bool(self.cfg.options.get("pydoll_headed", True)),
+            )
+        except Exception as e:
+            self.logger.warning(f"pydoll 登录异常: {e}")
+            return False
+        if not ok:
+            self.log(f"pydoll 登录未成功：{msg}")
+            return False
+        self.log(f"pydoll {msg}")
+        if cookies:
+            await bridge.inject_cookies(cookies)   # 落盘到 profile（并补 expires）
+        self.note_login_success()
+        return True
 
     # 桌面模式由 AI 执行，只能从它给出的说明里判断是否属于「登录失败」
     LOGIN_FAIL_KEYWORDS = ("登录失败", "登录未成功", "登陆失败", "密码错误", "密码不正确",

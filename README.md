@@ -256,7 +256,7 @@ python main.py gui                     # 启动图形界面
 
 **该任务默认走「桌面模式」**（`options.desktop_mode: true`），与其它任务不同：
 
-### 桌面模式（默认）：CookieCloud → 正常浏览器签到；无效才用调试浏览器登录
+### 桌面模式（默认）：CookieCloud → 正常浏览器签到；无效才登录（pydoll 优先）
 
 Cloudflare 能识别 Playwright/CDP 驱动的自动化浏览器，对人机验证卡得特别死；
 但登录页只是普通图形验证码，交给自动化反而又快又稳。所以人人任务拆成两段：
@@ -276,7 +276,10 @@ CookieCloud 取 cookie
 - **签到页的 CF 由 AI 在正常浏览器里处理**（没有调试端口，只能靠识图操作）：
   提示词明确要求「如果拦截时需要点击或拖动才能过验证，请你进行相关操作」，
   AI 会点「请验证您是真人」复选框或按住滑块拖到缺口
-- 若登录页也被 CF 拦住（自动化浏览器过不去）：自动回退到「正常浏览器里由 AI 识别验证码并登录 + 签到」
+- **登录优先用 pydoll**（`core/pydoll_login.py`）：直连 CDP、不设 `navigator.webdriver`，
+  实测打开本站登录页**根本不触发 CF**，可自动填账号密码 + AI 识别验证码完成登录；
+  登录后把 cookie 写回同一个 profile，正常浏览器直接就是登录状态
+- pydoll 失败 → 退回 Playwright 调试浏览器登录 → 仍失败则「正常浏览器里由 AI 识别验证码登录 + 签到」
 - 判定 cookie 是否有效用「带 cookie 请求签到页，看是否被踢到登录页」，不用开浏览器，几秒出结果
 - 会话 cookie（`expires=-1`）会自动补 30 天有效期，否则 Chromium 不会写进 profile（关键细节）
 
@@ -295,6 +298,8 @@ options:
   desktop_window_title: "Audiences"         # 正常浏览器窗口标题关键字（定位窗口用）
   desktop_startup_wait: 6                   # 打开后等页面渲染的秒数
   desktop_max_steps: 20                     # 识图点击最多多少步
+  pydoll_login: true                        # 优先用 pydoll 登录（不触发 CF）
+  pydoll_headed: true                       # pydoll 是否显示窗口（CF 托管挑战需要 True）
   normal_maximized: true                    # 正常浏览器最大化
   normal_topmost: true                      # 正常浏览器置顶
   keep_normal_open: false                   # 签到后是否保留浏览器窗口

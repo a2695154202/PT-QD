@@ -6,3 +6,4 @@ pyotp>=2.9            # TOTP 二次验证
 opencv-python-headless>=4.8  # 二维码识别（无 GUI 依赖）
 pyzbar>=0.1.9         # 二维码识别后备（模糊截图兼容性更好，Windows 自带 DLL）
 cryptography>=41.0    # CookieCloud AES 加解密
+pydoll-python>=3.0    # 无 WebDriver 指纹的 CDP 浏览器控制（人人登录用，不触发 CF）

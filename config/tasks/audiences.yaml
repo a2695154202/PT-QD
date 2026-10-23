@@ -34,6 +34,8 @@ options:
   desktop_window_title: "Audiences"         # 正常浏览器窗口标题关键字（用于最大化/置顶）
   desktop_startup_wait: 6                   # 正常浏览器打开后等页面渲染的秒数
   desktop_max_steps: 20                     # 识图点击最多执行多少步（每步一张截图）
+  pydoll_login: true                        # 优先用 pydoll 登录（无 WebDriver 指纹，实测本站登录页不触发 CF）
+  pydoll_headed: true                       # pydoll 是否显示浏览器窗口（CF 托管挑战需要 True）
   normal_maximized: true                    # 正常浏览器最大化
   normal_topmost: true                      # 正常浏览器置顶（始终显示在最前）
   keep_normal_open: false                   # 签到后是否保留正常浏览器窗口
