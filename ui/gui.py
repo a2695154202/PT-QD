@@ -414,7 +414,7 @@ class SettingsDialog(tk.Toplevel):
         self.sc_task_vars: dict[str, tk.BooleanVar] = {}
         picker = ttk.Labelframe(tab_sc, text="定时运行的任务（与主界面勾选无关）", padding=6)
         picker.grid(row=4, column=0, columnspan=2, sticky="nsew", **pad)
-        canvas = tk.Canvas(picker, height=132, highlightthickness=0)
+        canvas = tk.Canvas(picker, height=148, highlightthickness=0)
         sb = ttk.Scrollbar(picker, orient="vertical", command=canvas.yview)
         inner = ttk.Frame(canvas)
         inner.bind("<Configure>",
@@ -423,6 +423,27 @@ class SettingsDialog(tk.Toplevel):
         canvas.configure(yscrollcommand=sb.set)
         canvas.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
+
+        def _on_wheel(event):
+            """鼠标滚轮上下滚动任务列表（滚到顶/底时把事件交回上级，不卡住）"""
+            delta = int(getattr(event, "delta", 0) or 0)
+            if delta == 0:
+                return "break"
+            step = -1 if delta > 0 else 1
+            units = max(1, abs(delta) // 120)
+            first, last = canvas.yview()
+            if (step < 0 and first <= 0.0) or (step > 0 and last >= 1.0):
+                return "break"          # 已到边界：吃掉事件，别让外层容器跟着动
+            canvas.yview_scroll(step * units, "units")
+            return "break"
+
+        def _bind_wheel(widget):
+            widget.bind("<MouseWheel>", _on_wheel)
+            widget.bind("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
+            widget.bind("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))
+            for child in widget.winfo_children():
+                _bind_wheel(child)
+
         try:
             all_configs = load_task_configs()
         except Exception:
@@ -435,6 +456,10 @@ class SettingsDialog(tk.Toplevel):
         if not all_configs:
             ttk.Label(inner, text="config/tasks/ 下没有任务配置",
                       foreground="gray").pack(anchor="w")
+
+        # 滚轮绑到容器、画布、内部框架和每个复选框上（鼠标停在谁上面都能滚）
+        for w in (picker, canvas, inner, sb):
+            _bind_wheel(w)
         row_btns = ttk.Frame(picker)
         row_btns.pack(side="bottom", fill="x", pady=(4, 0))
         ttk.Button(row_btns, text="全选", width=6,
