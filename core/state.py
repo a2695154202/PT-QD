@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from datetime import datetime
 from typing import Any, Optional
@@ -73,9 +74,17 @@ def load_state() -> dict[str, dict[str, Any]]:
 
 
 def save_state(state: dict[str, dict[str, Any]]) -> None:
+    """原子写入：先写 .tmp 再 os.replace 覆盖。
+
+    直接覆盖写时，进程崩溃/断电可能留下被截断的 JSON；load_state() 会吞掉
+    解析异常返回 {}，等于把所有登录失败计数清零（被封的任务又被解锁）。
+    """
     try:
         STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        text = json.dumps(state, ensure_ascii=False, indent=2)
+        tmp = STATE_PATH.with_name(STATE_PATH.name + ".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, STATE_PATH)
     except Exception:
         pass
 

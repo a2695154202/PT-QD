@@ -98,19 +98,29 @@ class TTGTask(NexusPHPTask):
         # 点击前注册弹窗处理，避免 alert 阻塞后续操作，同时记录弹窗内容用于判定
         dialogs: list[str] = []
 
-        async def _on_dialog(dialog):
-            dialogs.append(dialog.message or "")
+        async def _accept_dialog(dialog):
             try:
                 await dialog.accept()
             except Exception:
                 pass
 
-        page.on("dialog", lambda d: asyncio.ensure_future(_on_dialog(d)))
+        def _on_dialog(dialog):
+            dialogs.append(dialog.message or "")
+            asyncio.ensure_future(_accept_dialog(dialog))
 
-        self.log("点击签到链接（#signed）")
-        await link.click()
-        self.events.emit(Events.CHECKIN_CLICKED, task_id=self.id)
-        await browser.wait_timeout(3000)
+        # 注意：handler 必须在结束时移除，否则同一浏览器实例多次运行会不断累积，
+        # 一个 alert 被多个 handler 重复 accept（Playwright 会报 "already handled"）
+        page.on("dialog", _on_dialog)
+        try:
+            self.log("点击签到链接（#signed）")
+            await link.click()
+            self.events.emit(Events.CHECKIN_CLICKED, task_id=self.id)
+            await browser.wait_timeout(3000)
+        finally:
+            try:
+                page.remove_listener("dialog", _on_dialog)
+            except Exception:
+                pass
 
         body = await self.page_text()
         signed_text = await self._signed_state()

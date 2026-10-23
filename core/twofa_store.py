@@ -46,9 +46,14 @@ class TwoFactorVault:
             return
         with open(self.path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
+        if not isinstance(data, dict):          # 文件被写成列表/标量时不崩
+            data = {}
         valid = set(TwoFactorAccount.__dataclass_fields__)
         items = []
-        for raw in data.get("accounts", []) or []:
+        raw_accounts = data.get("accounts", []) or []
+        if not isinstance(raw_accounts, list):
+            raw_accounts = []
+        for raw in raw_accounts:
             if not isinstance(raw, dict):
                 continue
             # 忽略未知字段，避免用户手工加了备注字段后整体加载失败

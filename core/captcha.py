@@ -44,8 +44,11 @@ class CaptchaSolver:
         用 page.request 发起请求，自动带上页面上下文的 cookie，
         因此 session 绑定的验证码也能取到；不经过页面渲染，拿到的就是原图。
         """
-        page = getattr(self.browser, "page", None)
-        if page is None:
+        try:
+            page = self.browser.page
+        except Exception:
+            # browser.page 是 property，浏览器没启动时抛 BrowserError；
+            # getattr(..., None) 的默认值只对 AttributeError 生效，所以必须显式捕获
             return None
         try:
             src = await page.eval_on_selector(

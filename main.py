@@ -29,16 +29,30 @@ from core.logger import setup_logging
 from tasks.manager import TaskManager
 
 
+def _disp_width(text: str) -> int:
+    """字符串的实际显示宽度（中文/全角算 2 列）"""
+    import unicodedata
+    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in str(text))
+
+
+def _pad(text, width: int) -> str:
+    """按显示宽度左对齐填充（f-string 的定宽对中文会错位）"""
+    s = str(text)
+    return s + " " * max(0, width - _disp_width(s))
+
+
 def _print_task_table(configs) -> None:
     if not configs:
         print("（没有任务配置，请在 config/tasks/ 下添加 *.yaml）")
         return
-    print(f"{'ID':<14}{'名称':<10}{'启用':<5}{'账号':<8}{'2FA':<5}{'CF':<5}站点")
+    print(f"{_pad('ID', 14)}{_pad('名称', 20)}{_pad('启用', 6)}{_pad('账号', 10)}"
+          f"{_pad('2FA', 5)}{_pad('CF', 5)}站点")
     print("-" * 86)
     for c in configs:
-        print(f"{c.id:<14}{c.name:<10}{'是' if c.enabled else '否':<5}"
-              f"{'已配置' if c.username else '未配置':<8}"
-              f"{'开' if c.has_2fa else '关':<5}{'开' if c.has_cf else '关':<5}{c.url}")
+        print(f"{_pad(c.id, 14)}{_pad(c.name, 20)}{_pad('是' if c.enabled else '否', 6)}"
+              f"{_pad('已配置' if c.username else '未配置', 10)}"
+              f"{_pad('开' if c.has_2fa else '关', 5)}"
+              f"{_pad('开' if c.has_cf else '关', 5)}{c.url}")
 
 
 def cmd_list(args) -> None:
@@ -219,14 +233,18 @@ def main() -> None:
     sub.add_parser("gui", help="启动图形界面").set_defaults(func=cmd_gui)
 
     args = parser.parse_args()
+
+    # 日志必须在分支之前初始化：以前「无参数启动 GUI」提前 return，
+    # 导致双击 exe 时没有 data/logs/app.log，也没有运行日志目录
+    cfg = AppConfig.load()
+    setup_logging(cfg.log_level, _abs(cfg.log_file))
+
     if not args.command:
         # 无参数（如 exe 双击）→ 启动图形界面
         from ui.gui import run_gui
         run_gui()
         return
 
-    cfg = AppConfig.load()
-    setup_logging(cfg.log_level, _abs(cfg.log_file))
     args.func(args)
 
 

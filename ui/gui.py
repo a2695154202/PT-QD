@@ -102,7 +102,18 @@ class TaskEditDialog(tk.Toplevel):
         frm.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.bind("<Configure>", lambda e: canvas.itemconfigure(win, width=e.width))
         self._canvas = canvas
-        self.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(int(-e.delta / 120), "units"))
+
+        def _on_wheel(event, cv=canvas):
+            step = int(round(-event.delta / 120.0))
+            if step == 0:
+                step = -1 if event.delta > 0 else 1
+            cv.yview_scroll(step, "units")
+            return "break"
+
+        # 绑在对话框（Toplevel）上就够：子控件的 bindtags 里包含所属 Toplevel，
+        # 滚轮事件会冒泡到这里。以前用 bind_all 会改掉整个进程的滚轮行为，
+        # destroy 里的 unbind_all 还会顺手清掉别处的全局绑定。
+        self.bind("<MouseWheel>", _on_wheel)
 
         # ---- 基础 ----
         base = ttk.Labelframe(frm, text="基础", padding=8)
@@ -184,7 +195,7 @@ class TaskEditDialog(tk.Toplevel):
 
     def destroy(self):
         try:
-            self.unbind_all("<MouseWheel>")
+            self.unbind("<MouseWheel>")
         except Exception:
             pass
         super().destroy()
@@ -720,7 +731,15 @@ class SigninApp:
         for w in self.task_frame.winfo_children():
             w.destroy()
         self.checks.clear()
-        configs = load_task_configs()
+        try:
+            configs = load_task_configs()
+        except Exception as e:      # 配置目录不可读等异常不能让 Tk 回调炸掉
+            LOGGER.exception("读取任务配置失败")
+            ttk.Label(self.task_frame, text=f"读取任务配置失败: {e}",
+                      foreground="#c62828", wraplength=520,
+                      justify="left").pack(anchor="w")
+            self.status.set("读取任务配置失败")
+            return
         st = load_state()
         if not configs:
             ttk.Label(self.task_frame, text="config/tasks/ 下没有任务配置").pack(anchor="w")
@@ -826,6 +845,13 @@ class SigninApp:
         self._set_running_ui(True)
         self.status.set(f"队列执行中（共 {len(task_ids)} 个任务，串行执行）...")
 
+        def _ui(call):
+            """把回调排到主线程执行；窗口已关闭时静默丢弃，避免线程里抛 TclError"""
+            try:
+                self.root.after(0, call)
+            except Exception:
+                pass
+
         def worker():
             async def main():
                 manager = TaskManager()
@@ -842,14 +868,14 @@ class SigninApp:
                     LOGGER.info(f"{'[成功]' if r.success else '[失败]'} [{r.task_id}] {r.message}")
                 if log_path:
                     LOGGER.info(f"本次运行日志: {log_path}")
-                self.root.after(0, lambda: self.status.set(
+                _ui(lambda: self.status.set(
                     f"运行完成 {ok}/{len(results)} 成功" + (f" | 日志: {log_path}" if log_path else "")))
             except Exception as e:
                 LOGGER.error(f"运行失败: {e}")
                 err_text = f"运行失败: {e}"
-                self.root.after(0, lambda t=err_text: self.status.set(t))
+                _ui(lambda t=err_text: self.status.set(t))
             finally:
-                self.root.after(0, self._after_run_done)
+                _ui(self._after_run_done)
 
         threading.Thread(target=worker, daemon=True).start()
         return True

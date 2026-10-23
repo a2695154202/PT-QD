@@ -264,7 +264,7 @@ def kill_browsers_on_profile(profile_dir: str, logger=None) -> int:
     - 任务跑完后确保不留浏览器窗口/标签页（包括 AI 识图时新开的窗口）
     - 下一次运行前清理占用（profile 被占用会导致 cookie 注入 / 登录失败）
     """
-    profile = str(profile_dir or "")
+    profile = str(profile_dir or "").replace("'", "''")   # 单引号会破坏下面的 PowerShell 字面量
     if not profile:
         return 0
     script = (
@@ -276,9 +276,15 @@ def kill_browsers_on_profile(profile_dir: str, logger=None) -> int:
     try:
         r = subprocess.run(["powershell", "-NoProfile", "-Command", script],
                            capture_output=True, text=True, timeout=30)
-        n = int((r.stdout or "0").strip().splitlines()[-1] or 0)
     except Exception:
         return 0
+    # 输出可能夹着 PowerShell 警告：从后往前找第一个纯数字行，找不到就当 0
+    n = 0
+    for line in reversed((r.stdout or "").splitlines()):
+        line = line.strip()
+        if line.isdigit():
+            n = int(line)
+            break
     if n:
         time.sleep(1.0)
         if logger:

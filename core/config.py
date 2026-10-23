@@ -164,17 +164,31 @@ class AppConfig:
             return cfg
         with open(path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
-        cfg.log_level = data.get("logging", {}).get("level", cfg.log_level)
-        cfg.log_file = data.get("logging", {}).get("file", cfg.log_file)
+        if not isinstance(data, dict):        # 文件内容是列表/标量时不要崩
+            return cfg
+        logging_section = data.get("logging") or {}
+        if not isinstance(logging_section, dict):
+            logging_section = {}
+        cfg.log_level = logging_section.get("level", cfg.log_level)
+        cfg.log_file = logging_section.get("file", cfg.log_file)
         for key, dc in (("browser", BrowserConfig), ("ai", AIConfig),
                         ("cookiecloud", CookieCloudConfig), ("proxy", ProxyConfig),
                         ("schedule", ScheduleConfig)):
             section = data.get(key, {}) or {}
+            if not isinstance(section, dict):
+                section = {}
             current = getattr(cfg, key)
             merged = {}
             for fname in dc.__dataclass_fields__:
                 merged[fname] = section[fname] if fname in section else getattr(current, fname)
             setattr(cfg, key, dc(**merged))
+        # 提示词按「默认值 + 用户覆盖」合并：用户只写部分键时不能缺 captcha，
+        # 否则 recognize_captcha 取默认提示词会 KeyError
+        if isinstance(cfg.ai.prompts, dict):
+            merged_prompts = dict(AIConfig().prompts)
+            merged_prompts.update({k: v for k, v in cfg.ai.prompts.items()
+                                   if isinstance(v, str) and v.strip()})
+            cfg.ai.prompts = merged_prompts
         return cfg
 
     def save(self, path: Optional[Path] = None) -> str:
@@ -272,14 +286,21 @@ class TaskConfig:
     def from_yaml(cls, path: Path) -> "TaskConfig":
         with open(path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
+        if not isinstance(data, dict):
+            data = {}
         task = data.get("task", {}) or {}
+        if not isinstance(task, dict):
+            task = {}
+        account = data.get("account", {}) or {}
+        options = data.get("options", {}) or {}
         return cls(
             id=task.get("id", Path(path).stem),
             name=task.get("name", task.get("id", Path(path).stem)),
-            enabled=bool(task.get("enabled", True)),
+            # 必须走 _as_bool：YAML 里手写 enabled: "false"（带引号）时 bool("false") 是 True
+            enabled=_as_bool(task.get("enabled"), True),
             url=task.get("url", ""),
-            account=data.get("account", {}) or {},
-            options=data.get("options", {}) or {},
+            account=account if isinstance(account, dict) else {},
+            options=options if isinstance(options, dict) else {},
             path=str(path),
         )
 
@@ -317,6 +338,27 @@ class TaskConfig:
             "#                           用尽后该任务不再执行，需登录成功或手动重置）\n"
             "# options.schedule_time : 预留的每日签到时间\n"
         )
+        ts = self.account.get("two_step")
+        if not isinstance(ts, dict):
+            ts = {}
+        two_step_lines = [
+            "  two_step:",
+            f"    enabled: {_q(bool(self.has_2fa))}",
+            f"    secret: {_q(self.totp_secret)}",
+            f"    vault_key: {_q(self.vault_key)}",
+        ]
+        # issuer / account 是 import-qr 与 set_totp_secret 写入的（凭证库列表显示、
+        # 站点域名自动匹配都要用），早前这里不写 → 保存一次就丢，补上
+        for key in ("issuer", "account"):
+            if ts.get(key):
+                two_step_lines.append(f"    {key}: {_q(ts[key])}")
+        known_ts = {"enabled", "secret", "vault_key", "issuer", "account"}
+        extra_ts = {k: v for k, v in ts.items() if k not in known_ts}
+        if extra_ts:
+            two_step_lines.extend("    " + ln for ln in
+                                  yaml.safe_dump(extra_ts, allow_unicode=True,
+                                                 sort_keys=False).splitlines())
+
         body = [
             "task:",
             f"  id: {_q(self.id)}",
@@ -326,10 +368,7 @@ class TaskConfig:
             "account:",
             f"  username: {_q(self.username)}",
             f"  password: {_q(self.password)}",
-            "  two_step:",
-            f"    enabled: {_q(bool(self.has_2fa))}",
-            f"    secret: {_q(self.totp_secret)}",
-            f"    vault_key: {_q(self.vault_key)}",
+            *two_step_lines,
             "options:",
             f"  has_2fa: {_q(bool(self.has_2fa))}",
             f"  has_cf: {_q(bool(self.has_cf))}",
@@ -356,7 +395,18 @@ class TaskConfig:
 
 
 def load_task_configs() -> list[TaskConfig]:
-    """扫描 config/tasks/ 下全部任务配置"""
+    """扫描 config/tasks/ 下全部任务配置。
+
+    单个文件写坏（YAML 语法错误）只跳过这一个并记警告，不能整个列表都读不出来。
+    """
+    from .logger import get_logger
+
     if not TASKS_CONFIG_DIR.exists():
         return []
-    return [TaskConfig.from_yaml(p) for p in sorted(TASKS_CONFIG_DIR.glob("*.yaml"))]
+    configs: list[TaskConfig] = []
+    for path in sorted(TASKS_CONFIG_DIR.glob("*.yaml")):
+        try:
+            configs.append(TaskConfig.from_yaml(path))
+        except Exception as e:
+            get_logger().warning(f"读取任务配置 {path.name} 失败（已跳过）: {e}")
+    return configs

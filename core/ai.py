@@ -79,7 +79,11 @@ class AIClient:
     # ---- 针对签到场景的封装 ----
     def recognize_captcha(self, image: bytes, prompt_key: str = "captcha") -> str:
         """识别图形验证码，返回纯验证码文本"""
-        text = self.vision(image, self.cfg.prompts.get(prompt_key, self.cfg.prompts["captcha"]))
+        prompts = self.cfg.prompts if isinstance(self.cfg.prompts, dict) else {}
+        # 用户自定义 prompts 时可能缺键：逐级兜底，不能直接下标取
+        prompt = (prompts.get(prompt_key) or prompts.get("captcha")
+                  or "请只输出图片中的验证码内容，不要任何解释。")
+        text = self.vision(image, prompt)
         # 去掉空白和常见干扰字符，只保留字母数字
         code = re.sub(r"[^A-Za-z0-9]", "", text)
         self.logger.info(f"AI 识别验证码: {text!r} -> {code!r}")

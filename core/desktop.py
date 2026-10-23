@@ -76,6 +76,27 @@ user32 = ctypes.windll.user32
 gdi32 = ctypes.windll.gdi32
 kernel32 = ctypes.windll.kernel32
 
+# ---- Win32 函数原型 ----
+# 64 位 Python 下必须显式声明返回类型：ctypes 默认按 c_int(32 位) 处理返回值，
+# 而 GlobalAlloc / GlobalLock 返回的是 64 位指针，会被静默截断成低 32 位。
+# 截断后 GlobalLock 直接返回 NULL，生产代码再拿 NULL 去 memmove 就会抛
+# 「OSError: exception: access violation writing 0x0」——剪贴板输入因此 100% 失败。
+kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+kernel32.GlobalAlloc.restype = ctypes.c_void_p
+kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+kernel32.GlobalLock.restype = ctypes.c_void_p
+kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+kernel32.GlobalUnlock.restype = wintypes.BOOL
+kernel32.GlobalFree.argtypes = [ctypes.c_void_p]
+kernel32.GlobalFree.restype = ctypes.c_void_p
+
+user32.OpenClipboard.argtypes = [wintypes.HWND]
+user32.OpenClipboard.restype = wintypes.BOOL
+user32.EmptyClipboard.restype = wintypes.BOOL
+user32.CloseClipboard.restype = wintypes.BOOL
+user32.SetClipboardData.argtypes = [wintypes.UINT, ctypes.c_void_p]
+user32.SetClipboardData.restype = ctypes.c_void_p
+
 _DPI_AWARE_SET = False
 
 
@@ -245,10 +266,22 @@ class DesktopController:
         if self.dry_run:
             self.last_action = f"scroll({int(dy)})"
             return
-        # 每格 120，dy 正数向下
-        notches = int(-dy / 120) or (1 if dy > 0 else -1)
-        user32.mouse_event(MOUSEEVENTF_WHEEL, 0, 0, notches * 120, 0)
+        user32.mouse_event(MOUSEEVENTF_WHEEL, 0, 0, self._wheel_delta(dy), 0)
         self.logger.info(f"已滚动 {int(dy)}px")
+
+    @staticmethod
+    def _wheel_delta(dy: int) -> int:
+        """像素位移 -> 滚轮 delta（每格 120，dy 正数向下，鼠标滚轮 delta 正数向上）
+
+        注意 `int(-dy/120)` 在 |dy| < 120 时会得到 0，早前用 `or 1` 兜底把符号丢了，
+        导致小距离滚动方向反转；这里改成四舍五入 + 明确按方向兜底一格。
+        """
+        if dy == 0:
+            return 0
+        notches = int(round(-float(dy) / 120.0))
+        if notches == 0:
+            notches = -1 if dy > 0 else 1
+        return notches * 120
 
     # ---------- 键盘 / 文本 ----------
     def type_text(self, text: str) -> None:
@@ -300,19 +333,33 @@ class DesktopController:
 
     @staticmethod
     def _set_clipboard(text: str) -> None:
-        if not user32.OpenClipboard(0):
+        """把文本写入剪贴板（CF_UNICODETEXT）。
+
+        注意：SetClipboardData 成功后内存所有权交给系统，不能再 GlobalFree；
+        任一步失败都要释放，避免句柄泄漏。
+        """
+        if not user32.OpenClipboard(None):
             raise RuntimeError("打开剪贴板失败")
+        handle = None
         try:
             user32.EmptyClipboard()
             data = text.encode("utf-16-le") + b"\x00\x00"
-            h = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(data))
-            if not h:
-                raise RuntimeError("分配内存失败")
-            p = kernel32.GlobalLock(h)
-            ctypes.memmove(p, data, len(data))
-            kernel32.GlobalUnlock(h)
-            user32.SetClipboardData(CF_UNICODETEXT, h)
+            handle = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(data))
+            if not handle:
+                raise RuntimeError("分配剪贴板内存失败")
+            p = kernel32.GlobalLock(handle)
+            if not p:
+                raise RuntimeError("锁定剪贴板内存失败")
+            try:
+                ctypes.memmove(p, data, len(data))
+            finally:
+                kernel32.GlobalUnlock(handle)
+            if not user32.SetClipboardData(CF_UNICODETEXT, handle):
+                raise RuntimeError("写入剪贴板失败")
+            handle = None      # 所有权已移交剪贴板
         finally:
+            if handle:
+                kernel32.GlobalFree(handle)
             user32.CloseClipboard()
 
     # ---------- 窗口 ----------

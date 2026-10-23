@@ -113,17 +113,33 @@ class CookieCloudClient:
         return False
 
     @staticmethod
-    def _to_playwright_cookie(c: dict) -> Optional[dict]:
-        """CookieCloud cookie -> Playwright add_cookies 格式"""
-        name, value = c.get("name"), c.get("value")
+    def _to_playwright_cookie(c: dict, default_domain: str = "") -> Optional[dict]:
+        """CookieCloud cookie -> Playwright add_cookies 格式
+
+        Playwright 要求每条 cookie 都能定位：要么有 url，要么 domain + path 都非空。
+        缺 domain 的 cookie 会让**整批** add_cookies 抛错（表现成"同步了但没登录态"），
+        因此这里用外层 key 作兜底域名，仍然没有就丢掉这一条。
+        """
+        name = c.get("name")
         if not name:
             return None
+        domain = c.get("domain") or default_domain or ""
+        if not isinstance(domain, str):
+            domain = ""
+        domain = domain.strip()
+        if not domain:
+            return None
+        value = c.get("value")
+        if value is None:
+            value = ""
+        elif not isinstance(value, str):
+            value = json.dumps(value, ensure_ascii=False)
         same_site_map = {"unspecified": "Lax", "lax": "Lax", "strict": "Strict", "no_restriction": "None"}
         out = {
             "name": name,
-            "value": value if isinstance(value, str) else json.dumps(value),
-            "domain": c.get("domain", ""),
-            "path": c.get("path", "/"),
+            "value": value,
+            "domain": domain,
+            "path": c.get("path", "/") or "/",
             "httpOnly": bool(c.get("httpOnly", False)),
             "secure": bool(c.get("secure", False)),
             "sameSite": same_site_map.get(str(c.get("sameSite", "lax")).lower(), "Lax"),
@@ -147,8 +163,10 @@ class CookieCloudClient:
         for domain, cookies in cookie_data.items():
             if not self._domain_match(domain, wanted):
                 continue
-            for c in cookies:
-                pc = self._to_playwright_cookie(c)
+            for c in cookies or []:
+                if not isinstance(c, dict):
+                    continue
+                pc = self._to_playwright_cookie(c, default_domain=domain)
                 if pc:
                     result.append(pc)
         self.logger.info(f"CookieCloud 解密得到 {len(result)} 个 cookie（域名筛选: {wanted or '全部'}）")
@@ -170,7 +188,7 @@ class CookieCloudClient:
         """测试连通性，返回 (成功?, 消息)"""
         try:
             cookies = self.get_cookies()
-            domains = sorted({c["domain"].lstrip(".") for c in cookies})
+            domains = sorted({str(c.get("domain") or "").lstrip(".") for c in cookies} - {""})
             return True, f"连接成功，解密得到 {len(cookies)} 个 cookie，涉及域名: {', '.join(domains[:10]) or '无'}"
         except Exception as e:
             return False, str(e)

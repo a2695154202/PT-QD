@@ -12,12 +12,13 @@ FMT = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", "%Y
 
 
 def setup_logging(level: str = "INFO", log_file: str = "data/logs/app.log") -> logging.Logger:
-    """初始化基础日志（控制台 + 全局滚动日志），幂等"""
+    """初始化基础日志（控制台 + 全局滚动日志），重复调用只更新日志级别"""
     global _initialized
     logger = logging.getLogger("signin")
+    # 级别每次都重新应用：在「全局设置」里改完日志级别应当立即生效
+    logger.setLevel(getattr(logging, level.upper(), logging.INFO))
     if _initialized:
         return logger
-    logger.setLevel(getattr(logging, level.upper(), logging.INFO))
 
     # 中文 Windows 控制台为 GBK，无法编码的字符替换而非抛异常；
     # line_buffering=True 保证重定向到文件/管道时日志也是逐行即时刷出

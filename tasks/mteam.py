@@ -104,11 +104,17 @@ class MTeamTask(BaseTask):
         except Exception:
             return False
 
-    LOGGED_IN_SELECTORS = ("header", ".ant-layout-header", ".ant-menu", ".ant-layout-sider")
+    # 只认「登录后才有」的元素：早前用裸 "header" 当判据，加上最后 `bool(text)`
+    # 兜底，导致任何有文字的页面（维护页/报错页）都被判成已登录 → 假成功
+    LOGGED_IN_SELECTORS = ("a[href*='logout']", "a[href*='userdetails']",
+                           ".ant-layout-header", ".ant-menu", ".ant-layout-sider")
     LOGIN_PAGE_HINTS = ("Sign in to MTeam", "用戶名", "密碼", "登 錄", "登錄")
 
     async def is_logged_in(self) -> bool:
-        """单页应用判定：排除登录页、2FA 页；再用布局元素与页面文本确认"""
+        """单页应用判定：排除登录页、2FA 页；再用「登录后才有」的元素确认
+
+        没有命中任何正向标志时一律按未登录处理（登录会重试；判错了会漏签一整天）。
+        """
         browser = self.ctx.browser
         try:
             url = await browser.url()
@@ -128,7 +134,9 @@ class MTeamTask(BaseTask):
             text = await self.page_text()
             if any(h in text for h in self.LOGIN_PAGE_HINTS):
                 return False
-            return bool(text.strip())
+            self.logger.info("未找到「已登录」标志元素，按未登录处理，页面片段: "
+                             + text[:120].replace("\n", " "))
+            return False
         except Exception:
             return False
 

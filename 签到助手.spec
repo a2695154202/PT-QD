@@ -63,6 +63,11 @@ a = Analysis(
     optimize=2,
 )
 
+# 不打包 2FA 凭证库：config/twofa.yaml 与用户本地数据同路径，误打包会把
+# 验证器密钥带进分发的 exe（缺失时 TwoFactorVault 首次保存会自动创建）
+a.datas = [d for d in a.datas
+           if "twofa.yaml" not in str(d[0]).lower() and "twofa.yaml" not in str(d[1]).lower()]
+
 # 体积精简：剔掉 opencv 自带的 ffmpeg 视频解码 DLL（约 30MB，本程序不处理视频）
 _FFMPEG_MARK = "opencv_videoio_ffmpeg"
 a.binaries = [b for b in a.binaries if _FFMPEG_MARK not in str(b[0])]

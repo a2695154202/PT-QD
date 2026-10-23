@@ -25,13 +25,9 @@ ai:
   model: gpt-4o-mini
   vision_model: ''
   timeout: 60
-  proactive: true
   prompts:
     captcha: 这是一张网站登录/签到用的图形验证码图片，通常是4位字母数字。请只输出验证码内容本身，不要输出任何解释、标点或多余字符。
     popup_captcha: 这是一张签到弹窗中的图形验证码图片。请只输出验证码内容本身，不要输出任何解释、标点或多余字符。
-    slider: '这是一张滑块验证码的截图，背景图中有一处缺口。请返回缺口左边缘距离图片左侧的像素 x 坐标，只输出 JSON：{"gap_x": 数字}'
-    challenge: '当前页面可能出现了人机验证（如 Cloudflare Turnstile）。请分析截图，如果需要点击复选框，返回 JSON：{"click":
-      [x, y]}，其中 x/y 为复选框在图片中的像素坐标；如果无需操作返回 {"click": null}'
 cookiecloud:
   enabled: false
   mode: overwrite

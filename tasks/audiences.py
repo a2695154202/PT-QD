@@ -37,6 +37,7 @@ from core.browser import BrowserController
 from core.browser_bridge import ProfileBridge
 from core.captcha import CaptchaSolver
 from core.cf import CFHandler
+from core.config import _as_bool
 from core.desktop import DesktopController
 from core.desktop_agent import DesktopAgent
 
@@ -158,19 +159,28 @@ class AudiencesTask(NexusPHPTask):
             return TaskResult(self.id, False, msg)
 
         opts = self.cfg.options
+        try:
+            debug_port = int(opts.get("desktop_debug_port") or 9223)
+        except (TypeError, ValueError):
+            debug_port = 9223
         bridge = ProfileBridge(
             profile_dir=(opts.get("desktop_profile") or "data/desktop_profile"),
-            port=int(opts.get("desktop_debug_port") or 9223),
+            port=debug_port,
             events=self.events,
         )
         title_kw = (opts.get("desktop_window_title") or "Audiences").strip()
-        maximized = bool(opts.get("normal_maximized", True))
-        topmost = bool(opts.get("normal_topmost", True))
-        keep_open = bool(opts.get("keep_normal_open", False))
+        # 统一用 _as_bool：手写 YAML 里的 "false"/"no"/"off" 不能被 bool() 当成 True
+        maximized = _as_bool(opts.get("normal_maximized"), True)
+        topmost = _as_bool(opts.get("normal_topmost"), True)
+        keep_open = _as_bool(opts.get("keep_normal_open"), False)
         try:
             startup_wait = float(opts.get("desktop_startup_wait") or 6)
         except (TypeError, ValueError):
             startup_wait = 6.0
+        try:
+            max_steps = max(1, int(opts.get("desktop_max_steps", 20) or 20))
+        except (TypeError, ValueError):
+            max_steps = 20
 
         desktop = DesktopController()
         agent = DesktopAgent(self.ctx.ai, desktop)
@@ -244,7 +254,7 @@ class AudiencesTask(NexusPHPTask):
             ok, message = await agent.drive(
                 goal=goal,
                 window_title=title_kw,
-                max_steps=int(opts.get("desktop_max_steps", 20)),
+                max_steps=max_steps,
             )
         except Exception as e:
             self.logger.exception(f"桌面模式执行异常: {e}")
