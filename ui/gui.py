@@ -288,8 +288,6 @@ class SettingsDialog(tk.Toplevel):
         self.ai_key = tk.StringVar()
         self.ai_model = tk.StringVar()
         self.ai_vision = tk.StringVar()
-        self.ai_proactive = tk.BooleanVar()
-        self.ai_agent_fallback = tk.BooleanVar()
         ttk.Checkbutton(tab_ai, text="启用 AI（验证码识别 / CF 挑战 / 滑块需要）",
                         variable=self.ai_enabled).grid(row=0, column=0, columnspan=2, sticky="w", **pad)
         for i, (label, var) in enumerate([("接口地址 base_url", self.ai_base),
@@ -301,12 +299,11 @@ class SettingsDialog(tk.Toplevel):
             e.grid(row=i, column=1, sticky="w", **pad)
             if label == "API Key":
                 e.configure(show="*")
-        ttk.Checkbutton(tab_ai, text="允许 AI 主动介入（遇到人机挑战时主动点击/拖动）",
-                        variable=self.ai_proactive).grid(row=5, column=0, columnspan=2, sticky="w", **pad)
-        ttk.Checkbutton(tab_ai,
-                        text="CF 过不去时让 AI 看图驱动浏览器兜底（AI 托管 / MCP）",
-                        variable=self.ai_agent_fallback).grid(
-            row=6, column=0, columnspan=2, sticky="w", **pad)
+        ttk.Label(tab_ai,
+                  text="AI 只用于识别登录/签到页的图形验证码；CF 人机验证由浏览器"
+                       "自行处理（元素定位点击 / 拖动滑块），不再调用 AI。",
+                  foreground="gray", font=("", 8), justify="left").grid(
+            row=5, column=0, columnspan=2, sticky="w", **pad)
 
         # --- CookieCloud ---
         tab_cc = ttk.Frame(nb, padding=8)
@@ -497,8 +494,6 @@ class SettingsDialog(tk.Toplevel):
         self.ai_key.set(c.ai.api_key)
         self.ai_model.set(c.ai.model)
         self.ai_vision.set(c.ai.vision_model)
-        self.ai_proactive.set(c.ai.proactive)
-        self.ai_agent_fallback.set(getattr(c.ai, "agent_fallback", True))
         self.cc_enabled.set(c.cookiecloud.enabled)
         self.cc_mode.set(c.cookiecloud.mode if c.cookiecloud.mode in ("overwrite", "paused") else "overwrite")
         self.cc_server.set(c.cookiecloud.server)
@@ -531,8 +526,6 @@ class SettingsDialog(tk.Toplevel):
         c.ai.api_key = self.ai_key.get().strip()
         c.ai.model = self.ai_model.get().strip()
         c.ai.vision_model = self.ai_vision.get().strip()
-        c.ai.proactive = bool(self.ai_proactive.get())
-        c.ai.agent_fallback = bool(self.ai_agent_fallback.get())
         c.cookiecloud.enabled = bool(self.cc_enabled.get())
         c.cookiecloud.mode = self.cc_mode.get() or "overwrite"
         c.cookiecloud.server = self.cc_server.get().strip()

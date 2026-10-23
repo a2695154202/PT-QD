@@ -174,6 +174,13 @@ class PydollLogin:
                     await browser.stop()
                 except Exception:
                     pass
+                # pydoll 的 stop() 可能只断开 CDP 连接而不结束浏览器进程，
+                # 这里按 profile 兜底杀掉，避免任务跑完还留着一个 Edge 窗口
+                try:
+                    from .browser_bridge import kill_browsers_on_profile
+                    kill_browsers_on_profile(self.profile_dir)
+                except Exception:
+                    pass
 
     # ---------- 内部步骤 ----------
     async def _wait_loaded(self, tab, wait_s: float = 6.0) -> None:

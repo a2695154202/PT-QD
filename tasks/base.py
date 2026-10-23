@@ -77,12 +77,12 @@ class TaskContext:
     browser: object                      # BrowserController
     ai: object                           # AIClient
     captcha: object                      # CaptchaSolver
-    slider: object                       # SliderSolver
     cf: object                           # CFHandler
     cookiecloud: Optional[object] = None # CookieCloudClient
     totp: Optional[object] = None        # TwoFactorAuth
     events: Optional[EventBus] = None
     app_cfg: Optional[AppConfig] = None
+    slider: Optional[object] = None      # 已废弃（AI 滑块缺口定位已移除）
 
 
 @dataclass

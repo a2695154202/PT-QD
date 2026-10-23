@@ -11,7 +11,6 @@ from core.config import AppConfig, TaskConfig, load_task_configs, LOG_DIR, _abs
 from core.cookiecloud import CookieCloudClient
 from core.events import EventBus
 from core.logger import current_run_log, get_logger, setup_logging, start_run_log, stop_run_log
-from core.slider import SliderSolver
 from core.state import record_result
 from .base import BaseTask, TaskContext, TaskResult, load_registry
 
@@ -78,7 +77,6 @@ class TaskManager:
             browser=self.browser,
             ai=self.ai,
             captcha=CaptchaSolver(self.ai, self.browser, self.events),
-            slider=SliderSolver(self.ai, self.browser),
             cf=CFHandler(self.browser, self.ai, self.events),
             cookiecloud=self.cookiecloud,
             events=self.events,

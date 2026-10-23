@@ -165,51 +165,6 @@ def cmd_gui(args) -> None:
     run_gui()
 
 
-def cmd_mcp(args) -> None:
-    """启动浏览器 MCP 服务端，把浏览器暴露给外部 AI 客户端接管。
-
-    用途：Cloudflare 人机验证实在自动过不去时，把控制权交给外部 AI
-    （支持 MCP 的 AI 助手），由它读取页面、点击、拖动滑块通过验证。
-
-    在 MCP 客户端里注册（例如 Claude Desktop / 各类 AI 助手）：
-      {"command": "python", "args": ["main.py", "mcp"], "cwd": "本项目目录"}
-    """
-    import asyncio
-
-    from core.browser import BrowserController
-    from core.browser_tools import BrowserToolbox
-    from core.cf import CFHandler
-    from core.logger import redirect_console_to_stderr
-    from core.mcp_server import BrowserMCP
-
-    cfg = AppConfig.load()
-    # MCP 用 stdout 传 JSON-RPC，日志必须改写到 stderr，否则会污染协议流
-    redirect_console_to_stderr()
-
-    async def _serve() -> int:
-        browser = BrowserController(cfg.browser)
-        try:
-            await browser.start()
-            url = (args.url or "").strip()
-            if url:
-                try:
-                    await browser.goto(url)
-                except Exception as e:
-                    print(f"打开 {url} 失败: {e}", file=sys.stderr)
-            # 挑战处理器用于 state 工具读取挑战状态
-            cf = CFHandler(browser, None, None)
-            toolbox = BrowserToolbox(browser, cf)
-            mcp = BrowserMCP(toolbox)
-            await mcp.serve_stdio()
-            return 0
-        finally:
-            await browser.stop()
-
-    print("浏览器 MCP 服务端启动中…（stdio 传输，供外部 AI 客户端接管浏览器）",
-          file=sys.stderr)
-    sys.exit(asyncio.run(_serve()))
-
-
 def _bootstrap_runtime() -> None:
     """打包成 exe 时，首次运行把内置的配置模板释放到 exe 同目录（用户可编辑）"""
     if not getattr(sys, "frozen", False):
@@ -257,9 +212,6 @@ def main() -> None:
     p_qr.add_argument("--task", default=None, help="绑定到哪个任务（默认只入凭证库，不绑定）")
     p_qr.set_defaults(func=cmd_import_qr)
 
-    p_mcp = sub.add_parser("mcp", help="启动浏览器 MCP 服务端（CF 过不去时让外部 AI 接管浏览器）")
-    p_mcp.add_argument("--url", default=None, help="启动后先打开的 URL")
-    p_mcp.set_defaults(func=cmd_mcp)
 
     sub.add_parser("test-ai", help="测试 AI 配置").set_defaults(func=cmd_test_ai)
     sub.add_parser("test-cookiecloud", help="测试 CookieCloud 连接").set_defaults(func=cmd_test_cookiecloud)

@@ -253,21 +253,34 @@ class ProfileBridge:
             self.logger.info("已关闭正常浏览器")
 
     def close_stale(self) -> int:
-        """关掉上次遗留的、占用本 profile 的 msedge 进程（profile 被占用会导致注入失败）"""
-        profile = self.profile_abs
-        script = (
-            "$p = Get-CimInstance Win32_Process -Filter \"Name='msedge.exe'\" | "
-            f"Where-Object {{ $_.CommandLine -like '*{profile}*' }}; "
-            "if ($p) { $p | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; "
-            "$p.Count } else { 0 }"
-        )
-        try:
-            r = subprocess.run(["powershell", "-NoProfile", "-Command", script],
-                               capture_output=True, text=True, timeout=30)
-            n = int((r.stdout or "0").strip().splitlines()[-1] or 0)
-        except Exception:
-            return 0
-        if n:
-            self.logger.info(f"已清理 {n} 个占用 profile 的残留浏览器进程")
-            time.sleep(1.5)
-        return n
+        """关掉占用本 profile 的 msedge 进程（含 AI 新开的标签页/窗口）"""
+        return kill_browsers_on_profile(self.profile_abs, logger=self.logger)
+
+
+def kill_browsers_on_profile(profile_dir: str, logger=None) -> int:
+    """关掉所有命令行里带该 profile 路径的 msedge 进程。
+
+    用途：
+    - 任务跑完后确保不留浏览器窗口/标签页（包括 AI 识图时新开的窗口）
+    - 下一次运行前清理占用（profile 被占用会导致 cookie 注入 / 登录失败）
+    """
+    profile = str(profile_dir or "")
+    if not profile:
+        return 0
+    script = (
+        "$p = Get-CimInstance Win32_Process -Filter \"Name='msedge.exe'\" | "
+        f"Where-Object {{ $_.CommandLine -like '*{profile}*' }}; "
+        "if ($p) { $p | ForEach-Object { Stop-Process -Id $_.ProcessId -Force "
+        "-ErrorAction SilentlyContinue }; $p.Count } else { 0 }"
+    )
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-Command", script],
+                           capture_output=True, text=True, timeout=30)
+        n = int((r.stdout or "0").strip().splitlines()[-1] or 0)
+    except Exception:
+        return 0
+    if n:
+        time.sleep(1.0)
+        if logger:
+            logger.info(f"已关闭 {n} 个占用该 profile 的浏览器进程")
+    return n

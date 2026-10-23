@@ -86,8 +86,6 @@ class AIConfig:
     model: str = "gpt-4o-mini"
     vision_model: str = ""                  # 留空则复用 model
     timeout: int = 60
-    proactive: bool = True                  # 是否允许 AI 主动介入（CF/滑块等）
-    agent_fallback: bool = True             # CF 自动处理失败后，是否用 AI 看图驱动浏览器兜底
     prompts: dict = field(default_factory=lambda: {
         "captcha": (
             "这是一张网站登录/签到用的图形验证码图片，通常是4位字母数字。"
@@ -96,17 +94,6 @@ class AIConfig:
         "popup_captcha": (
             "这是一张签到弹窗中的图形验证码图片。请只输出验证码内容本身，"
             "不要输出任何解释、标点或多余字符。"
-        ),
-        "slider": (
-            "这是一张滑块验证码的截图，背景图中有一处缺口。"
-            "请返回缺口左边缘距离图片左侧的像素 x 坐标，只输出 JSON：{\"gap_x\": 数字}"
-        ),
-        "challenge": (
-            "这是一张 Cloudflare 人机验证控件的截图（只截取控件所在区域）。"
-            "如果图中存在一个尚未勾选的复选框（通常在控件左侧、是一个方框），"
-            "请返回该复选框在图片中的像素坐标，格式为 JSON：{\"click\": [x, y]}；"
-            "如果已经显示勾选、正在旋转验证、或者图里没有可点击的复选框，"
-            "请返回 {\"click\": null}。只输出 JSON，不要任何解释。"
         ),
     })
 

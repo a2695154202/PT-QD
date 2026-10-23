@@ -53,10 +53,19 @@ a = Analysis(
     excludes=[
         "matplotlib", "pandas", "scipy", "PyQt5", "PySide2", "PySide6",
         "IPython", "pytest", "notebook", "jupyter", "setuptools",
+        # 标准库里体积可观又用不到的模块
+        "unittest", "doctest", "pdb", "lib2to3", "pydoc", "pydoc_data",
+        "tkinter.test", "tkinter.tix", "test", "tests", "distutils",
+        # opencv 的视频 I/O（ffmpeg DLL 约 30MB），本程序只做图片编解码
+        "cv2.videoio", "cv2.videoio_registry",
     ],
     noarchive=False,
-    optimize=0,
+    optimize=2,
 )
+
+# 体积精简：剔掉 opencv 自带的 ffmpeg 视频解码 DLL（约 30MB，本程序不处理视频）
+_FFMPEG_MARK = "opencv_videoio_ffmpeg"
+a.binaries = [b for b in a.binaries if _FFMPEG_MARK not in str(b[0])]
 
 pyz = PYZ(a.pure)
 

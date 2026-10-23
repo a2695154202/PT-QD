@@ -69,18 +69,6 @@ class AIClient:
         data = self._post({"model": model, "messages": messages}, timeout)
         return self._extract(data)
 
-    def vision_json(self, image: bytes | str, prompt: str, timeout: Optional[int] = None) -> dict:
-        """图片识别并解析 JSON 结果（容忍 ```json 包裹和前后杂文本）"""
-        text = self.vision(image, prompt, timeout)
-        m = re.search(r"\{.*\}", text, re.S)
-        if not m:
-            raise AIError(f"AI 未返回 JSON: {text[:200]}")
-        import json
-        try:
-            return json.loads(m.group(0))
-        except json.JSONDecodeError as e:
-            raise AIError(f"AI 返回的 JSON 解析失败: {m.group(0)[:200]}") from e
-
     @staticmethod
     def _extract(data: dict) -> str:
         try:
@@ -96,11 +84,3 @@ class AIClient:
         code = re.sub(r"[^A-Za-z0-9]", "", text)
         self.logger.info(f"AI 识别验证码: {text!r} -> {code!r}")
         return code
-
-    def locate_slider_gap(self, image: bytes) -> int:
-        """识别滑块缺口 x 坐标（像素）"""
-        data = self.vision_json(image, self.cfg.prompts["slider"])
-        gap = data.get("gap_x")
-        if gap is None:
-            raise AIError(f"AI 未返回 gap_x: {data}")
-        return int(gap)

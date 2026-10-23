@@ -1,7 +1,7 @@
 # 网站签到助手
 
 基于 **Edge 浏览器自动化（Playwright/CDP）+ AI 视觉识别** 的网站每日签到工具。
-支持 2FA 动态验证码、CookieCloud 同步、AI 识别图形/滑块/CF 验证码，任务可插拔扩展，可打包为免环境 exe。
+支持 2FA 动态验证码、CookieCloud 同步、AI 识别图形验证码，任务可插拔扩展，可打包为免环境 exe。
 
 ## 功能特性
 
@@ -9,7 +9,7 @@
 |------|------|
 | 浏览器控制 | 程序启动 Edge（带远程调试端口 9222，可 `edge://inspect` 挂接调试）或连接已运行的 Edge；支持点击、填表、截取页面指定位置图片 |
 | 2FA（TOTP） | 导入谷歌身份验证器二维码（`otpauth://` 与 `otpauth-migration://` 导出格式均支持）；**任务级勾选是否有 2FA，并可指定绑定凭证库中的哪个验证器** |
-| AI 能力（用户配置） | OpenAI 兼容接口；验证码识别、滑块缺口定位、CF 挑战主动点击；事件驱动「主动触发」 |
+| AI 能力（用户配置） | OpenAI 兼容接口；识别登录/签到页的图形验证码（CF 人机验证不再调用 AI） |
 | CookieCloud | 输入服务器/UUID/密钥，本地 AES 解密同步 cookie；工作模式：**覆盖到浏览器 / 暂停同步**，默认同步全部站点；**在打开站点之前就把 cookie 注入浏览器** |
 | 代理 | 全局设置代理地址（http/socks5 + 可选账号密码）；任务配置里勾选「本任务走代理」才使用，未勾选的任务强制直连 |
 | 签到任务 | 任务基类 + 注册表 + YAML 配置；任务可单独勾选是否有 2FA / CF 验证 / 走代理。内置 **PT-空（site-a.example）**、**HDDolby（site-b.example）**、**TTG 听听歌（site-c.example）**、**馒头 M-Team（site-d.example）**、**人人 Audiences（site-e.example）**、**Akile（site-f.example，控制台「每日签到」）**、**憨憨 HHCLUB（site-g.example，attendance.php 停留即签到）** |
@@ -134,14 +134,11 @@ options:
 │   ├── browser.py           # Edge 控制器（launch/attach CDP、点击、截图、反检测、生命周期）
 │   ├── ai.py                # AI 客户端（OpenAI 兼容：文本/视觉/JSON）
 │   ├── captcha.py           # 验证码识别（页面元素 → AI → 文本）
-│   ├── slider.py            # 滑块验证码（AI 定位缺口 + 拟人拖动）
+│   ├── slider.py            # 拟人化鼠标拖动轨迹（滑块用）
 │   ├── cf.py                # CF/人机挑战（每秒实时探测点击/滑动控件，元素定位优先，AI 兜底）
 │   ├── desktop.py           # 桌面控制（Win32 屏幕截图 + 鼠标/键盘原生输入 + 窗口最大化/置顶）
 │   ├── browser_bridge.py    # profile 桥接（调试浏览器写 cookie ↔ 正常浏览器签到，共用同一 profile）
 │   ├── desktop_agent.py     # 识图点击 Agent（AI 看屏幕截图，决定点哪里、填什么）
-│   ├── browser_tools.py     # 浏览器工具箱（MCP 与 AI 托管共用的一套工具定义）
-│   ├── mcp_server.py        # 浏览器 MCP 服务端（stdio JSON-RPC，供外部 AI 接管浏览器）
-│   ├── browser_agent.py     # AI 托管（CF 过不去时由视觉模型看图驱动浏览器）
 │   ├── cookiecloud.py       # CookieCloud 拉取 + 解密（fixed/legacy 双格式）
 │   ├── totp.py              # TOTP + 二维码解析（含 otpauth-migration protobuf）
 │   ├── twofa_store.py       # 2FA 凭证库（多账号、按任务绑定）
@@ -353,7 +350,7 @@ Cloudflare 的挑战页初始只是「请稍候…」/「Just a moment…」，*
    - 元素点不动（被遮挡）时，退化为按元素自身坐标点击
 2. **几何兜底**：只有容器、找不到具体元素时，按"复选框在控件左侧"点击
 3. **AI 兜底**：以上都失败才截图，且**只截控件所在区域**交给 AI 定位
-4. **滑块**：识别到滑块按钮后，AI 定位缺口 → 拟人化轨迹拖动；AI 不可用时拖到轨道末端
+4. **滑块**：识别到滑块按钮后，用拟人化轨迹拖到轨道末端（不做 AI 缺口定位）
 
 ### 截图前的居中处理
 
@@ -382,62 +379,6 @@ AI 截图前会先把控件 `scrollIntoView({block:'center'})`，并调整主窗
 - 浏览器只在**整个队列结束后**关闭一次；运行日志同样只落一份 `run_*.log`
 - 任务之间若代理设置不同，会针对该任务重启浏览器（日志会注明"仅切换代理"）
 - 图形界面运行期间会禁用运行按钮，避免重复点击造成并发
-
-## 浏览器 MCP（CF 过不去时让 AI 接管浏览器）
-
-内置的自动处理（每秒探测 + 元素定位点击 + 几何兜底）已经能应付绝大多数站点，
-但仍有少数站点对自动化浏览器校验特别严。这种情况下提供两条升级路径：
-
-### 1. 内置 AI 托管（开箱即用，无需任何配置）
-
-全局设置 → AI 里勾选「**CF 过不去时让 AI 看图驱动浏览器兜底**」后，
-内置策略失败时会自动切换到 AI 托管模式：
-
-- AI 模型看截图，自己决定下一步：`click` / `drag` / `scroll` / `wait` / `screenshot` / `finish`
-- 每一步的执行结果都会记进历史，AI 能看到"我上一步做了什么、结果如何"，不会重复无效动作
-- 挑战消失（`state` 里 `挑战中=false`）即判定通过
-
-### 2. 浏览器 MCP 服务端（让更强大的外部 AI 接管）
-
-若内置 AI 也过不去，可启动浏览器 MCP 服务端，把浏览器控制权交给外部 AI：
-
-```bash
-python main.py mcp                      # 启动浏览器并暴露为 MCP 工具
-python main.py mcp --url https://xxx    # 启动后先打开指定页面
-```
-
-在 MCP 客户端（Claude Desktop / 各类支持 MCP 的 AI 助手）里注册：
-
-```json
-{
-  "command": "python",
-  "args": ["D:/path/to/main.py", "mcp"],
-  "cwd": "D:/path/to/签到助手"
-}
-```
-
-注册后外部 AI 就能调用下列工具操作浏览器（坐标为 CSS 像素，与截图严格一致）：
-
-| 工具 | 说明 |
-|------|------|
-| `screenshot` | 截取整窗或指定区域（可只截验证控件那一小块） |
-| `click(x, y)` | 在指定坐标点击 |
-| `drag(x1,y1,x2,y2)` | 拖动（滑块验证码 / 拼图） |
-| `scroll(dx, dy)` | 滚动页面 |
-| `fill(selector, text)` | 向输入框填文本 |
-| `goto(url)` | 跳转 URL |
-| `evaluate(script)` | 执行 JS |
-| `state` | 读取 URL / 标题 / 是否仍在挑战 / Turnstile token 状态 |
-| `wait(ms)` | 等待 |
-| `finish(passed)` | 结束（passed=true 表示已通过） |
-
-### 实现说明
-
-- 两条路径共用同一套工具定义（`core/browser_tools.py`），行为完全一致
-- MCP 用 stdio 传输（每行一条 JSON-RPC），日志写 stderr、不污染协议流
-- 坐标统一 CSS 像素（`scale="css"` 截图），AI 返回的坐标可直接用于鼠标
-- Windows 下 asyncio 无法用 `connect_read_pipe` 读 stdin（proactor 报 WinError 6），
-  改用线程池阻塞读，跨平台稳定
 
 ## 浏览器调试能力
 

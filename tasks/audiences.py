@@ -39,7 +39,6 @@ from core.captcha import CaptchaSolver
 from core.cf import CFHandler
 from core.desktop import DesktopController
 from core.desktop_agent import DesktopAgent
-from core.slider import SliderSolver
 
 from .base import TaskError, TaskResult, register
 from .nexusphp import NexusPHPTask
@@ -252,8 +251,11 @@ class AudiencesTask(NexusPHPTask):
             self.events.emit("task_error", task_id=self.id, error=str(e))
             return TaskResult(self.id, False, f"任务异常: {e}")
         finally:
+            # 跑完人人任务就关掉本程序打开的浏览器（含 AI 识图时新开的标签页/窗口）；
+            # keep_normal_open=true 时保留，供人工查看签到结果
             if not keep_open:
                 bridge.close_normal()
+                bridge.close_stale()
 
         # 归一化消息（不要把「获得/爆米花」这类常驻词当成成功）
         message = self._normalize_message(message)
@@ -298,12 +300,11 @@ class AudiencesTask(NexusPHPTask):
             always_on_top=False,
         )
         dbg = BrowserController(cfg, self.events)
-        old = (self.ctx.browser, self.ctx.captcha, self.ctx.slider, self.ctx.cf)
+        old = (self.ctx.browser, self.ctx.captcha, self.ctx.cf)
         try:
             await dbg.start()
             self.ctx.browser = dbg
             self.ctx.captcha = CaptchaSolver(self.ctx.ai, dbg, self.events)
-            self.ctx.slider = SliderSolver(self.ctx.ai, dbg)
             self.ctx.cf = CFHandler(dbg, self.ctx.ai, self.events)
             self.log("调试浏览器已就绪，开始自动登录")
             ok = await self.login_with_password()
@@ -319,7 +320,7 @@ class AudiencesTask(NexusPHPTask):
                 await dbg.stop()          # 关闭时 cookie 落盘到 profile
             except Exception:
                 pass
-            (self.ctx.browser, self.ctx.captcha, self.ctx.slider, self.ctx.cf) = old
+            (self.ctx.browser, self.ctx.captcha, self.ctx.cf) = old
 
     async def _login_with_pydoll(self, bridge: ProfileBridge) -> bool:
         """用 pydoll 登录（无 WebDriver 指纹）。

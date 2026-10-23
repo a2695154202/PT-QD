@@ -28,7 +28,7 @@ from typing import Optional
 
 from .ai import AIClient
 from .browser import BrowserController
-from .events import EventBus, Events
+from .events import EventBus
 from .logger import get_logger
 from .slider import human_track
 
@@ -129,7 +129,6 @@ class CFHandler:
     MAX_SLIDES = 2             # 单轮挑战最多拖动滑块次数
     CLICK_INTERVAL = 2.0       # 两次点击的最小间隔（秒）
     SLIDE_INTERVAL = 4.0       # 两次滑动的最小间隔（秒）
-    AI_INTERVAL = 3.0          # 两次 AI 定位的最小间隔（秒）
     BUDGET_RENEW_S = 15.0      # 超过这个时间没通过 → 重新给一次点击/滑动预算
     POLL_INTERVAL_MS = 1000    # 状态检测间隔（1 秒）
 
@@ -453,95 +452,16 @@ class CFHandler:
         except Exception:
             return False, ""
 
-    async def _ai_click(self, target: dict) -> tuple[bool, str]:
-        """元素无法精确定位时：只截控件区域交给 AI 定位并立即点击"""
-        if not (self.ai and getattr(self.ai, "available", False)
-                and getattr(self.ai.cfg, "proactive", True)):
-            return False, ""
-        page = self.browser.page
-        try:
-            rect = await self._target_rect(target)
-            if not rect or rect["width"] < 8 or rect["height"] < 8:
-                return False, ""
-            clip = {"x": rect["x"], "y": rect["y"],
-                    "width": rect["width"], "height": rect["height"]}
-            self.events.emit(Events.CHALLENGE_DETECTED)
-            img = await self.browser.clip_screenshot(clip, name="cf_challenge")
-            result = self.ai.vision_json(img, self._prompt()) or {}
-            click = result.get("click")
-            if not click:
-                self.logger.info("AI 判断当前无需点击（可能已自动通过或正在验证）")
-                return False, ""
-            cx = rect["x"] + float(click[0])
-            cy = rect["y"] + float(click[1])
-            await page.mouse.move(cx, cy, steps=10)
-            await self.browser.wait_timeout(100)
-            await page.mouse.click(cx, cy)
-            return True, f"AI 定位点击（{cx:.0f}, {cy:.0f}）"
-        except Exception as e:
-            self.logger.warning(f"AI 定位挑战控件失败: {e}")
-            return False, ""
-
     async def _target_rect(self, target: dict) -> Optional[dict]:
         """控件区域：Turnstile 优先取内部 iframe 的矩形（更精确）"""
         if target.get("kind") == "turnstile":
             return await self._turnstile_rect(target)
         return await self._center_and_box(target["locator"])
 
-    def _prompt(self) -> str:
-        prompts = getattr(self.ai.cfg, "prompts", {}) if self.ai else {}
-        return prompts.get("challenge") or (
-            "这是 Cloudflare 人机验证控件的截图。若图中存在尚未勾选的复选框，"
-            "返回其像素坐标 JSON：{\"click\": [x, y]}；若已勾选或无可点击项返回 {\"click\": null}。"
-        )
-
-    def _viewport_prompt(self) -> str:
-        """整屏截图用的提示词：控件在闭合 shadow DOM 里、选择器完全定位不到时使用"""
-        return (
-            "这是浏览器窗口截图，页面上可能有 Cloudflare 人机验证："
-            "通常是一个写着「请验证您是真人」的复选框（方框），或需要拖动/点击的控件。\n"
-            "如果图中有**尚未勾选**的复选框，请返回它中心的像素坐标，只输出 JSON："
-            "{\"click\": [x, y]}\n"
-            "如果已经勾选、正在转圈验证、或者页面没有可点击的验证控件，只输出："
-            "{\"click\": null}\n"
-            "坐标以截图左上角为原点、单位是像素。不要输出任何解释文字。"
-        )
-
-    async def _ai_click_viewport(self) -> tuple[bool, str]:
-        """页面上**完全定位不到**控件时的兜底：整屏截图交给 AI 找复选框并点击。
-
-        新版 CF 托管挑战会把 Turnstile 渲染在闭合 shadow root 里，
-        主文档选择器和 page.frames 都可能看不到 —— 这时只能靠视觉定位。
-        """
-        if not (self.ai and getattr(self.ai, "available", False)
-                and getattr(self.ai.cfg, "proactive", True)):
-            return False, ""
-        try:
-            img = await self.browser.screenshot(name="cf_viewport")
-            data = self.ai.vision_json(img, self._viewport_prompt()) or {}
-            point = data.get("click")
-            if not point or len(point) != 2:
-                return False, ""
-            x, y = float(point[0]), float(point[1])
-            vp = await self.browser.page.evaluate(
-                "() => ({w: window.innerWidth, h: window.innerHeight})"
-            )
-            if not (0 <= x <= vp["w"] and 0 <= y <= vp["h"]):
-                self.logger.warning(f"AI 返回的坐标越界（{x:.0f},{y:.0f}），忽略")
-                return False, ""
-            await self.browser.page.mouse.move(x, y, steps=8)
-            await self.browser.wait_timeout(120)
-            await self.browser.page.mouse.click(x, y)
-            return True, f"AI 整屏定位点击（{x:.0f}, {y:.0f}）"
-        except Exception as e:
-            self.logger.warning(f"AI 整屏定位验证控件失败: {e}")
-            return False, ""
-
-    async def _try_click(self, allow_ai: bool = True) -> tuple[bool, str]:
+    async def _try_click(self) -> tuple[bool, str]:
         """尝试处理"需要点击"的验证控件。
 
-        顺序：元素定位优先 → AI 局部截图兜底 → 几何兜底（仅 Turnstile 控件）。
-        allow_ai=False 时跳过 AI，避免每秒都请求 AI。
+        顺序：元素定位点击 → 几何兜底（仅 Turnstile 控件，复选框在左侧）。
         """
         target = await self._locate_checkbox()
         if not target:
@@ -551,16 +471,7 @@ class CFHandler:
             ok, msg = await self._click_locator(target)
             if ok:
                 return True, msg
-            # 元素点不动 → 退化为 AI 定位
-            if allow_ai:
-                return await self._ai_click(target)
             return False, ""
-
-        # 只有容器：优先 AI 定位（能区分"需要点"与"正在验证中"）
-        if allow_ai:
-            ok, msg = await self._ai_click(target)
-            if ok:
-                return True, msg
 
         # 几何兜底：Turnstile 复选框位于控件左侧
         if target["kind"] == "turnstile":
@@ -605,7 +516,7 @@ class CFHandler:
                 "width": box["width"], "height": box["height"]}
 
     async def _try_slide(self, target: dict) -> tuple[bool, str]:
-        """处理需要拖动的滑块：AI 定位缺口 → 拟人化拖动
+        """处理需要拖动的滑块：拟人化拖动到轨道末端
 
         坐标要点：先滚动定位（只做一次），再统一读取滑块与轨道的矩形，
         避免二次滚动导致先前读到的坐标失效。
@@ -628,27 +539,8 @@ class CFHandler:
             start_x = box["x"] + box["width"] / 2
             start_y = box["y"] + box["height"] / 2
 
-            # 3) 计算拖动距离
-            distance = 0
-            gap = None
-            if self.ai and getattr(self.ai, "available", False) \
-                    and getattr(self.ai.cfg, "proactive", True):
-                try:
-                    clip = {"x": cbox["x"], "y": cbox["y"],
-                            "width": cbox["width"], "height": cbox["height"]}
-                    img = await self.browser.clip_screenshot(clip, name="cf_slider")
-                    gap = self.ai.locate_slider_gap(img)
-                    self.logger.info(f"AI 定位滑块缺口 x = {gap}px")
-                except Exception as e:
-                    self.logger.warning(f"AI 定位滑块缺口失败: {e}")
-
-            if gap is not None and 0 <= gap <= cbox["width"]:
-                # 拼图块左边缘对齐缺口左边缘
-                distance = int((cbox["x"] + gap) - box["x"])
-            else:
-                # 无缺口信息时拖到轨道末端
-                distance = int(cbox["width"] - box["width"])
-            distance = max(0, min(distance, int(cbox["width"])))
+            # 3) 计算拖动距离：没有 AI 缺口定位，直接拖到轨道末端
+            distance = max(0, min(int(cbox["width"] - box["width"]), int(cbox["width"])))
 
             if distance <= 0:
                 return False, ""
@@ -780,33 +672,6 @@ class CFHandler:
             self.logger.warning(f"Turnstile 几何点击失败: {e}")
             return False, ""
 
-    async def _ai_click_turnstile(self, floc) -> tuple[bool, str]:
-        """Turnstile 兜底：只截控件区域交给 AI 定位复选框"""
-        if not (self.ai and getattr(self.ai, "available", False)):
-            return False, ""
-        page = self.browser.page
-        try:
-            rect = await self._center_and_box(floc)
-            if not rect or rect["width"] < 10:
-                return False, ""
-            clip = {"x": rect["x"], "y": rect["y"],
-                    "width": rect["width"], "height": rect["height"]}
-            img = await self.browser.clip_screenshot(clip, name="turnstile")
-            result = self.ai.vision_json(img, self._prompt()) or {}
-            click = result.get("click")
-            if not click:
-                self.logger.info("AI 判断当前无需点击（可能已自动通过或正在验证）")
-                return False, ""
-            cx = rect["x"] + float(click[0])
-            cy = rect["y"] + float(click[1])
-            await page.mouse.move(cx, cy, steps=10)
-            await self.browser.wait_timeout(80)
-            await page.mouse.click(cx, cy)
-            return True, f"AI 定位 Turnstile 复选框并点击（{cx:.0f}, {cy:.0f}）"
-        except Exception as e:
-            self.logger.warning(f"AI 定位 Turnstile 失败: {e}")
-            return False, ""
-
     async def solve_turnstile(self, timeout_s: int = 40,
                               is_done=None) -> bool:
         """通过 Cloudflare Turnstile：**每 1 秒**探测，控件就绪立即处理。
@@ -838,15 +703,6 @@ class CFHandler:
             if ready and attempts < 3 and (time.monotonic() - last_click) >= 2.0:
                 attempts += 1
                 ok, method = await self._click_turnstile()
-                if ok:
-                    last_click = time.monotonic()
-                    self.logger.info(
-                        f"[Turnstile {elapsed:.0f}s] 已处理验证控件（{method}，第 {attempts} 次）"
-                    )
-                    await self.browser.wait_timeout(1000)
-                    continue
-                # 元素点不动 → AI 兜底
-                ok, method = await self._ai_click_turnstile(floc)
                 if ok:
                     last_click = time.monotonic()
                     self.logger.info(
@@ -905,7 +761,6 @@ class CFHandler:
         slides = 0            # 本轮滑动次数
         last_click = 0.0
         last_slide = 0.0
-        last_ai = 0.0
         self.logger.info(
             f"检测到人机验证挑战，开始实时处理（每 1 秒探测一次点击/滑动控件，最长 {timeout_s}s）"
         )
@@ -946,10 +801,7 @@ class CFHandler:
 
             # 3) 可点击控件
             if clicks < self.MAX_CLICKS and (now - last_click) >= self.CLICK_INTERVAL:
-                allow_ai = (now - last_ai) >= self.AI_INTERVAL
-                clicked, method = await self._try_click(allow_ai=allow_ai)
-                if allow_ai:
-                    last_ai = time.monotonic()
+                clicked, method = await self._try_click()
                 if clicked:
                     clicks += 1
                     last_click = time.monotonic()
@@ -961,19 +813,6 @@ class CFHandler:
                     continue
 
             if not acted:
-                # 4) 完全定位不到控件：新版 CF 把 Turnstile 渲染在闭合 shadow DOM 里，
-                #    选择器和 page.frames 都看不见 → 整屏截图让 AI 视觉定位并点击
-                if clicks < self.MAX_CLICKS and (now - last_ai) >= self.AI_INTERVAL:
-                    last_ai = time.monotonic()
-                    clicked, method = await self._ai_click_viewport()
-                    if clicked:
-                        clicks += 1
-                        last_click = time.monotonic()
-                        self.logger.info(
-                            f"[CF {elapsed:.0f}s] 已点击验证控件（{method}，第 {clicks} 次）"
-                        )
-                        await self.browser.wait_timeout(1500)
-                        continue
                 self.logger.info(
                     f"[CF {elapsed:.0f}s] 仍在验证中（点击 {clicks} 次 / 滑动 {slides} 次），"
                     "继续每秒探测可交互控件"
@@ -990,46 +829,9 @@ class CFHandler:
             )
         return ok
 
-    async def handle_with_ai_agent(self, timeout_s: int = 60) -> bool:
-        """内置兜底：自动处理失败后，让 AI 模型看图自己驱动浏览器过验证。
-
-        与 MCP 是同一套工具（core.browser_tools），区别只在于调用者是
-        程序内置的视觉模型，无需用户安装任何 MCP 客户端。
-        """
-        # 先按常规策略实时处理一遍
-        if await self.handle(timeout_s):
-            return True
-        if not (self.ai and getattr(self.ai, "available", False)):
-            self.logger.info("AI 未启用，无法启用 AI 托管浏览器")
-            return False
-
-        from .browser_agent import BrowserAgent
-        from .browser_tools import BrowserToolbox
-        self.logger.info("自动处理失败，切换到 AI 托管模式（AI 看图驱动浏览器）")
-        toolbox = BrowserToolbox(self.browser, self)
-        agent = BrowserAgent(self.ai, toolbox)
-        try:
-            ok = await agent.drive(goal="通过 Cloudflare 人机验证")
-        except Exception as e:
-            self.logger.warning(f"AI 托管执行异常: {e}")
-            return False
-        if ok:
-            self.logger.info("AI 托管成功通过验证")
-        else:
-            self.logger.warning(
-                "AI 托管仍未通过。可安装 MCP 客户端让更强大的 AI 接管浏览器"
-                "（运行 `python main.py mcp` 启动浏览器 MCP 服务端）"
-            )
-        return ok
-
     async def solve(self, timeout_s: int = 60) -> bool:
-        """统一入口：常规实时处理 → 失败后按配置切换 AI 托管 / MCP 兜底。
+        """统一入口：实时处理 CF 挑战（元素定位点击 + 滑块拖动 + 几何兜底）。
 
-        任务代码应调用本方法，而不是直接调 handle()，
-        这样 CF 过不去时能自动升级到 AI 驱动浏览器。
+        任务代码应调用本方法，而不是直接调 handle()。
         """
-        use_agent = bool(self.ai and getattr(self.ai, "available", False)
-                         and getattr(self.ai.cfg, "agent_fallback", True))
-        if use_agent:
-            return await self.handle_with_ai_agent(timeout_s)
         return await self.handle(timeout_s)
