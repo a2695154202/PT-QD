@@ -53,3 +53,4 @@ schedule:
   time: '09:30'          # HH:MM，24 小时制
   skip_signed: true      # 跳过今天已签到的任务
   catch_up: true         # 错过时间点（程序后开）也补跑当天一次
+  tasks: []              # 定时只跑这些任务（写 id，如 [akile, hhan]）；[] = 全部启用任务

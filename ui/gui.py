@@ -18,7 +18,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from core.config import AppConfig, load_task_configs
 from core.logger import get_logger
-from core.scheduler import describe, normalize_hhmm, should_run
+from core.scheduler import describe, normalize_hhmm, pick_scheduled, should_run
 from core.state import (is_signed, login_fail_info, load_state, record_date,
                         reset_all_login_fail, reset_login_fail, schedule_last_run,
                         set_schedule_last_run, today_str)
@@ -409,19 +409,60 @@ class SettingsDialog(tk.Toplevel):
         ttk.Checkbutton(tab_sc, text="错过时间点也补跑（例如 10 点才打开程序，仍会跑一次当天）",
                         variable=self.sc_catch_up).grid(
             row=3, column=0, columnspan=2, sticky="w", **pad)
+
+        # 定时运行哪些任务（与主界面勾选无关）
+        self.sc_task_vars: dict[str, tk.BooleanVar] = {}
+        picker = ttk.Labelframe(tab_sc, text="定时运行的任务（与主界面勾选无关）", padding=6)
+        picker.grid(row=4, column=0, columnspan=2, sticky="nsew", **pad)
+        canvas = tk.Canvas(picker, height=132, highlightthickness=0)
+        sb = ttk.Scrollbar(picker, orient="vertical", command=canvas.yview)
+        inner = ttk.Frame(canvas)
+        inner.bind("<Configure>",
+                   lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=inner, anchor="nw")
+        canvas.configure(yscrollcommand=sb.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        try:
+            all_configs = load_task_configs()
+        except Exception:
+            all_configs = []
+        for cfg in all_configs:
+            var = tk.BooleanVar(value=False)
+            label = cfg.name if cfg.enabled else f"{cfg.name}（未启用）"
+            ttk.Checkbutton(inner, text=label, variable=var).pack(anchor="w")
+            self.sc_task_vars[cfg.id] = var
+        if not all_configs:
+            ttk.Label(inner, text="config/tasks/ 下没有任务配置",
+                      foreground="gray").pack(anchor="w")
+        row_btns = ttk.Frame(picker)
+        row_btns.pack(side="bottom", fill="x", pady=(4, 0))
+        ttk.Button(row_btns, text="全选", width=6,
+                   command=lambda: self._set_all_sc_tasks(True)).pack(side="left")
+        ttk.Button(row_btns, text="全不选", width=7,
+                   command=lambda: self._set_all_sc_tasks(False)).pack(side="left", padx=6)
+        ttk.Label(row_btns, text="（全选＝跟随任务启用状态）",
+                  foreground="gray", font=("", 8)).pack(side="left")
+
         ttk.Label(tab_sc,
                   text="说明：\n"
-                       "· 触发范围＝「启用」的任务；勾选「跳过今天已经签到的任务」可避免白跑。\n"
+                       "· 定时运行**只跑上面勾选的任务**，与主界面勾选无关；全选＝跑所有「启用」的任务。\n"
+                       "· 勾选「跳过今天已经签到的任务」可避免白跑。\n"
                        "· 每天只自动跑一次；跑完会在状态栏显示下次运行时间。\n"
                        "· 程序需要保持打开（可最小化）；关掉程序就不会触发。\n"
                        "· 手动点「▶ 运行选中 / 运行全部启用」不受定时设置影响。",
                   foreground="gray", font=("", 8), justify="left").grid(
-            row=4, column=0, columnspan=2, sticky="w", **pad)
+            row=5, column=0, columnspan=2, sticky="w", **pad)
 
         btns = ttk.Frame(self)
         btns.pack(fill="x", padx=8, pady=(0, 8))
         ttk.Button(btns, text="保存", command=self._save).pack(side="right", padx=4)
         ttk.Button(btns, text="取消", command=self.destroy).pack(side="right", padx=4)
+
+    def _set_all_sc_tasks(self, flag: bool) -> None:
+        """定时任务列表：全选 / 全不选"""
+        for var in getattr(self, "sc_task_vars", {}).values():
+            var.set(bool(flag))
 
     def _load(self):
         c = self.cfg
@@ -452,6 +493,10 @@ class SettingsDialog(tk.Toplevel):
         self.sc_time.set(getattr(getattr(c, "schedule", None), "time", "09:30") or "09:30")
         self.sc_skip_signed.set(bool(getattr(getattr(c, "schedule", None), "skip_signed", True)))
         self.sc_catch_up.set(bool(getattr(getattr(c, "schedule", None), "catch_up", True)))
+        saved = list(getattr(getattr(c, "schedule", None), "tasks", []) or [])
+        chosen = set(saved) if saved else set(self.sc_task_vars)   # 空=全部
+        for tid, var in self.sc_task_vars.items():
+            var.set(tid in chosen if chosen else True)
 
     def _save(self):
         c = self.cfg
@@ -487,6 +532,15 @@ class SettingsDialog(tk.Toplevel):
         c.schedule.time = sc_time
         c.schedule.skip_signed = bool(self.sc_skip_signed.get())
         c.schedule.catch_up = bool(self.sc_catch_up.get())
+        selected = [tid for tid, var in self.sc_task_vars.items() if var.get()]
+        if self.sc_enabled.get() and self.sc_task_vars and not selected:
+            messagebox.showerror("没有选择任务",
+                                 "定时运行启用时需要至少勾选一个要运行的任务。")
+            return
+        # 全选 = 跟随任务启用状态（以后新增的任务也会自动包含）
+        if self.sc_task_vars and len(selected) == len(self.sc_task_vars):
+            selected = []
+        c.schedule.tasks = selected
         try:
             c.browser.debugging_port = int(self.br_port.get() or 9222)
             c.browser.slow_mo = int(self.br_slow.get() or 50)
@@ -549,19 +603,22 @@ class SigninApp:
         return should_run(datetime.now(), sc.time, schedule_last_run(), sc.catch_up)
 
     def _run_scheduled(self):
-        """到点触发：跑「启用」的任务，可按配置跳过今天已签到的"""
+        """到点触发：只跑「定时运行」页里勾选的任务，可按配置跳过今天已签到的"""
         try:
             sc = AppConfig.load().schedule
         except Exception as e:
             LOGGER.error(f"定时运行读取配置失败: {e}")
             return
-        ids = [c.id for c in load_task_configs() if c.enabled]
+        configs = load_task_configs()
+        ids, skipped = pick_scheduled(sc.tasks, [(c.id, c.enabled) for c in configs])
+        for note in skipped:
+            LOGGER.warning(f"定时运行跳过 {note}")
         if sc.skip_signed:
             ids = [tid for tid in ids if not is_signed(tid)]
         # 无论有没有任务，都标记今天已触发，避免每 20 秒重复判断
         set_schedule_last_run(note=f"定时 {sc.time}，待跑 {len(ids)} 个任务")
         if not ids:
-            LOGGER.info(f"⏰ 定时运行（{sc.time}）：今天没有需要跑的任务（都已签到），跳过")
+            LOGGER.info(f"⏰ 定时运行（{sc.time}）：今天没有需要跑的任务（未选中或都已签到），跳过")
             self._update_schedule_label()
             return
         LOGGER.info(f"⏰ 定时运行触发（每天 {sc.time}）：本次 {len(ids)} 个任务 → {', '.join(ids)}")
@@ -573,6 +630,10 @@ class SigninApp:
             sc = AppConfig.load().schedule
             text = describe(datetime.now(), sc.time, schedule_last_run(),
                             sc.enabled, sc.catch_up)
+            if sc.enabled:
+                configs = load_task_configs()
+                ids, _ = pick_scheduled(sc.tasks, [(c.id, c.enabled) for c in configs])
+                text += f"｜{len(ids)} 个任务"
         except Exception:
             text = "定时：读取配置失败"
         try:

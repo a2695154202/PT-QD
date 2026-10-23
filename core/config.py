@@ -147,11 +147,12 @@ class ProxyConfig:
 
 @dataclass
 class ScheduleConfig:
-    """每日定时运行：到点自动跑一遍启用中的任务"""
+    """每日定时运行：到点自动跑一遍定时选中的任务"""
     enabled: bool = False
     time: str = "09:30"                     # 每天运行时间 HH:MM（24 小时制）
     skip_signed: bool = True                # 今天已签到的任务不再跑
     catch_up: bool = True                   # 错过时间点（程序后开）也补跑当天一次
+    tasks: list = field(default_factory=list)   # 定时运行哪些任务；空=全部启用任务
 
     def is_valid_time(self) -> bool:
         from .scheduler import parse_hhmm

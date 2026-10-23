@@ -81,6 +81,31 @@ def next_run_at(now: datetime, hhmm: str, last_run_date: str = "") -> Optional[d
     return target + timedelta(days=1)
 
 
+def pick_scheduled(selected, available) -> tuple[list[str], list[str]]:
+    """决定定时运行要跑哪些任务。
+
+    - `selected` 为空（旧配置或"全部"）→ 跑全部**启用**的任务
+    - `selected` 有值 → 只跑选中的任务；任务被删了或自身未启用则跳过
+    - `available`: [(任务 id, 是否启用)]
+
+    返回 (要跑的 id 列表, 被跳过的说明列表)
+    """
+    picked = [str(s) for s in (selected or []) if str(s or "").strip()]
+    if not picked:
+        return [tid for tid, enabled in available if enabled], []
+    enabled_map = {tid: bool(enabled) for tid, enabled in available}
+    run: list[str] = []
+    skipped: list[str] = []
+    for tid in picked:
+        if tid not in enabled_map:
+            skipped.append(f"{tid}（任务配置已不存在）")
+        elif not enabled_map[tid]:
+            skipped.append(f"{tid}（任务未启用）")
+        else:
+            run.append(tid)
+    return run, skipped
+
+
 def describe(now: datetime, hhmm: str, last_run_date: str = "", enabled: bool = True,
              catch_up: bool = True) -> str:
     """界面状态文案"""
