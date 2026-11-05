@@ -66,7 +66,9 @@ class BrowserConfig:
     user_data_dir: str = "data/edge_profile"
     headless: bool = False
     slow_mo: int = 50                       # 每步操作间隔(ms)，拟人化
-    default_timeout: int = 15000            # 默认等待超时(ms)
+    default_timeout: int = 20000            # 单步操作等待(ms)：慢机器/慢网络留足时间
+    nav_timeout: int = 45000                # 打开页面等待(ms)：CF 挑战页常迟迟不触发 domcontentloaded
+    action_delay_ms: int = 150              # 每个动作前的拟人小延时(ms，0=关闭，实际带随机抖动)
     viewport_width: int = 1440
     viewport_height: int = 900
     stealth: bool = True                    # 反自动化检测
@@ -112,7 +114,11 @@ class CookieCloudConfig:
 
 @dataclass
 class ProxyConfig:
-    """全局代理设置：任务勾选「走代理」时才使用；未勾选的任务强制直连"""
+    """全局代理设置：任务勾选「走代理」时才使用。
+
+    未配置 / 未勾选 → 强制直连。本程序**不使用 Windows 系统代理**
+    （开着代理或 VPN 的电脑上，系统代理会让签到流程莫名超时）。
+    """
     enabled: bool = False
     server: str = ""                        # http://127.0.0.1:7890 或 socks5://127.0.0.1:1080
     username: str = ""
@@ -147,11 +153,30 @@ class ScheduleConfig:
 
 
 @dataclass
+class TelegramConfig:
+    """Telegram 通知：跑完一遍任务后把汇总结果发到指定会话。
+
+    默认 use_proxy=True：api.telegram.org 在国内直连基本不通，
+    这里默认复用「全局设置 → 代理」里的地址；没配代理时才直连（并写日志提示）。
+    """
+    enabled: bool = False
+    bot_token: str = ""
+    chat_id: str = ""
+    use_proxy: bool = True              # 默认走代理
+    only_on_failure: bool = False       # 只在有任务失败时推送
+
+    @property
+    def ready(self) -> bool:
+        return bool(self.enabled and self.bot_token.strip() and self.chat_id.strip())
+
+
+@dataclass
 class AppConfig:
     browser: BrowserConfig = field(default_factory=BrowserConfig)
     ai: AIConfig = field(default_factory=AIConfig)
     cookiecloud: CookieCloudConfig = field(default_factory=CookieCloudConfig)
     proxy: ProxyConfig = field(default_factory=ProxyConfig)
+    telegram: TelegramConfig = field(default_factory=TelegramConfig)
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
     log_level: str = "INFO"
     log_file: str = "data/logs/app.log"
@@ -173,7 +198,7 @@ class AppConfig:
         cfg.log_file = logging_section.get("file", cfg.log_file)
         for key, dc in (("browser", BrowserConfig), ("ai", AIConfig),
                         ("cookiecloud", CookieCloudConfig), ("proxy", ProxyConfig),
-                        ("schedule", ScheduleConfig)):
+                        ("telegram", TelegramConfig), ("schedule", ScheduleConfig)):
             section = data.get(key, {}) or {}
             if not isinstance(section, dict):
                 section = {}
@@ -200,6 +225,8 @@ class AppConfig:
             "cookiecloud": {f.name: getattr(self.cookiecloud, f.name)
                             for f in CookieCloudConfig.__dataclass_fields__.values()},
             "proxy": {f.name: getattr(self.proxy, f.name) for f in ProxyConfig.__dataclass_fields__.values()},
+            "telegram": {f.name: getattr(self.telegram, f.name)
+                         for f in TelegramConfig.__dataclass_fields__.values()},
             "schedule": {f.name: getattr(self.schedule, f.name)
                          for f in ScheduleConfig.__dataclass_fields__.values()},
             "logging": {"level": self.log_level, "file": self.log_file},
@@ -210,7 +237,9 @@ class AppConfig:
             "# browser.fullscreen / always_on_top: 启动后全屏 / 窗口置顶（仅 Windows 生效）\n"
             "# ai: 任意 OpenAI 兼容接口；识别验证码需支持视觉的模型\n"
             "# cookiecloud.mode: overwrite=拉取并覆盖到浏览器 / paused=暂停同步\n"
-            "# proxy: 全局代理；任务配置里勾选「走代理」的任务才使用它，未勾选的任务强制直连\n"
+            "# proxy: 全局代理；任务配置里勾选「走代理」的任务才使用它。\n"
+            "#        没配置代理 / 或本任务没勾选时一律直连，**从不使用 Windows 系统代理**\n"
+            "# telegram: 签到汇总推送到 Telegram；use_proxy=true（默认）时复用上面的代理地址\n"
             "# schedule: 每日定时运行（time 为 HH:MM）；skip_signed=跳过今天已签到的任务；\n"
             "#           catch_up=错过时间点（程序后开）也补跑当天一次\n"
             "# logging: 日志级别与全局日志文件\n"
@@ -333,7 +362,8 @@ class TaskConfig:
             "# account.two_step.vault_key : 绑定 2FA 凭证库账号，格式 \"issuer|name\"\n"
             "# options.has_2fa       : 本任务是否有二次验证（勾选）\n"
             "# options.has_cf        : 本任务是否有 Cloudflare 人机验证（勾选；未勾选则不处理）\n"
-            "# options.use_proxy     : 本任务是否走全局代理（勾选才走，未勾选强制直连）\n"
+            "# options.use_proxy     : 本任务是否走全局代理（勾选才走；未勾选强制直连，\n"
+            "#                           系统代理从不使用，AI/CookieCloud 请求同理）\n"
             "# options.max_login_retry : 登录失败次数上限（跨天累计，只有登录成功才清零；\n"
             "#                           用尽后该任务不再执行，需登录成功或手动重置）\n"
             "# options.schedule_time : 预留的每日签到时间\n"

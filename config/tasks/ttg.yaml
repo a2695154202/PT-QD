@@ -19,5 +19,5 @@ options:
   has_cf: true                  # 站点有 Cloudflare 保护，勾选后遇到挑战自动处理
   use_proxy: false              # 是否走全局代理
   max_login_retry: 3            # TTG 连续 6 次失败会封 IP，不要调大
-  checkin_url: "https://site-c.example/index.php"
+  checkin_url: "/index.php"     # 只写路径，域名自动跟随 task.url（站点换域名时只改 url）
   schedule_time: "09:30"

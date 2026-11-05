@@ -3,7 +3,10 @@
 # browser.fullscreen / always_on_top: 启动后全屏 / 窗口置顶（仅 Windows 生效）
 # ai: 任意 OpenAI 兼容接口；识别验证码需支持视觉的模型
 # cookiecloud.mode: overwrite=拉取并覆盖到浏览器 / paused=暂停同步
-# proxy: 全局代理；任务配置里勾选「走代理」的任务才使用它，未勾选的任务强制直连
+# proxy: 全局代理；任务配置里勾选「走代理」的任务才使用它。
+# telegram: 签到汇总推送到 Telegram；use_proxy=true 时复用上面的代理地址
+#        没配置代理或本任务没勾选时一律直连，**从不使用 Windows 系统代理**
+#        （开着系统代理/VPN 的电脑上，系统代理会让任务莫名超时）
 # logging: 日志级别与全局日志文件
 browser:
   mode: launch
@@ -12,7 +15,9 @@ browser:
   user_data_dir: data/edge_profile
   headless: false
   slow_mo: 50
-  default_timeout: 15000
+  default_timeout: 20000        # 单步操作等待(ms)，慢机器可再调大
+  nav_timeout: 45000            # 打开页面等待(ms)：CF 挑战页常迟迟不触发 domcontentloaded
+  action_delay_ms: 150          # 每个动作前的拟人小延时(ms)，0=关闭；实际带随机抖动
   viewport_width: 1440
   viewport_height: 900
   stealth: true
@@ -40,6 +45,12 @@ proxy:
   server: ''
   username: ''
   password: ''
+telegram:
+  enabled: false
+  bot_token: ''
+  chat_id: ''
+  use_proxy: true          # 默认走代理（api.telegram.org 国内直连不通）
+  only_on_failure: false   # 只在有任务失败时推送
 logging:
   level: INFO
   file: data/logs/app.log

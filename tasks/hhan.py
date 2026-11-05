@@ -20,7 +20,7 @@
 from __future__ import annotations
 
 from core.events import Events
-from .base import register
+from .base import TaskError, register
 from .nexusphp import NexusPHPTask
 
 
@@ -48,8 +48,8 @@ class HHanTask(NexusPHPTask):
         "a[href*='attendance.php']",
     )
 
-    # ---- 签到页（打开并停留 5 秒即完成）----
-    CHECKIN_URL = "https://site-g.example/attendance.php"
+    # ---- 签到页（打开并停留 5 秒即完成；只写路径，域名跟随 task.url）----
+    CHECKIN_URL = "/attendance.php"
     DEFAULT_STAY_SECONDS = 5
 
     # 兜底用的签到按钮候选（该站一般不用点，页面加载即签到）
@@ -70,7 +70,9 @@ class HHanTask(NexusPHPTask):
     # ---------- 签到：打开 attendance.php 并停留 N 秒 ----------
     async def do_checkin(self) -> tuple[bool, str]:
         browser = self.ctx.browser
-        url = (self.cfg.options.get("checkin_url") or self.CHECKIN_URL).strip()
+        url = await self.checkin_page_url()
+        if not url:
+            raise TaskError("签到页地址为空：请检查任务配置里的 task.url / options.checkin_url")
         try:
             stay = int(self.cfg.options.get("stay_seconds", self.DEFAULT_STAY_SECONDS) or 0)
         except (TypeError, ValueError):

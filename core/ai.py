@@ -11,6 +11,7 @@ from typing import Optional
 
 import requests
 
+from . import net
 from .config import AIConfig
 from .logger import get_logger
 
@@ -37,7 +38,8 @@ class AIClient:
             "Content-Type": "application/json",
         }
         try:
-            resp = requests.post(url, json=payload, headers=headers, timeout=timeout or self.cfg.timeout)
+            resp = net.request("POST", url, json=payload, headers=headers,
+                               timeout=timeout or self.cfg.timeout)
             resp.raise_for_status()
             return resp.json()
         except requests.RequestException as e:

@@ -37,8 +37,8 @@ class AkileTask(BaseTask):
     description = "AkileCloud(site-f.example) 每日签到：账号密码 + 谷歌验证器(2FA) + 控制台「每日签到」"
     site = "https://site-f.example/"
 
-    LOGIN_URL = "https://site-f.example/login"
-    CHECKIN_URL = "https://site-f.example/console"
+    LOGIN_URL = "/login"                   # 只写路径，域名跟随 task.url
+    CHECKIN_URL = "/console"
 
     # ---- 首页右上角登录入口 ----
     SEL_HOME_LOGIN = "button:has-text('登录')"
@@ -151,6 +151,8 @@ class AkileTask(BaseTask):
     # ---------- 打开站点 ----------
     async def open_site(self, url: str = "") -> None:
         await self.ctx.browser.goto((url or self.cfg.url or self.site).strip())
+        # 记下本次导航真实落地的站点域名（站点 301 换域名时，登录页/控制台跟着走）
+        await self.note_site_origin()
         await self.ctx.browser.wait_timeout(2500)   # Vue SPA 渲染
         await self.handle_challenge_if_any()
 
@@ -177,14 +179,16 @@ class AkileTask(BaseTask):
         try:
             loc = page.locator(self.SEL_HOME_LOGIN).first
             if await loc.count() and await loc.is_visible():
+                await self.ctx.browser.action_pause()
                 await loc.click()
                 await self.ctx.browser.wait_timeout(2500)
                 if await self.has_login_form():
                     return
         except Exception as e:
             self.logger.warning(f"点击右上角「登录」失败: {e}")
-        self.log(f"直接打开登录页: {self.LOGIN_URL}")
-        await self.open_site(self.LOGIN_URL)
+        login_url = await self.login_page_url()
+        self.log(f"直接打开登录页: {login_url}")
+        await self.open_site(login_url)
 
     async def login_with_password(self) -> bool:
         browser = self.ctx.browser
@@ -198,6 +202,7 @@ class AkileTask(BaseTask):
         if remaining <= 0:
             raise TaskError(self.login_lock_message())
         self.log(f"登录预算：已失败 {self.login_used()}/{limit} 次，本次最多再试 {remaining} 次")
+        login_url = await self.login_page_url()
 
         for attempt in range(1, remaining + 1):
             if await self.is_logged_in():
@@ -206,7 +211,7 @@ class AkileTask(BaseTask):
             try:
                 if not await self.has_login_form():
                     self.log(f"第 {attempt}/{remaining} 次尝试：页面上没有登录表单，重新打开登录页")
-                    await self.open_site(self.LOGIN_URL)
+                    await self.open_site(login_url)
                     if await self.is_logged_in():
                         self.log("重新打开后已登录")
                         return True
@@ -214,7 +219,7 @@ class AkileTask(BaseTask):
                         continue
 
                 self.log(f"第 {attempt}/{remaining} 次登录尝试（累计失败 {self.login_used()}/{limit}）")
-                await browser.wait_selector(self.SEL_USERNAME, timeout=10000)
+                await browser.wait_selector(self.SEL_USERNAME)
                 await browser.fill(self.SEL_USERNAME, username)
                 await browser.fill(self.SEL_PASSWORD, password)
                 await browser.click(self.SEL_LOGIN_BTN)
@@ -228,7 +233,7 @@ class AkileTask(BaseTask):
                         self.log("2FA 未完成，计入一次登录失败")
                         if self.note_login_failure("2FA 未完成") >= limit:
                             break
-                        await self.open_site(self.LOGIN_URL)
+                        await self.open_site(login_url)
                         continue
                     await browser.wait_timeout(2500)
 
@@ -250,11 +255,11 @@ class AkileTask(BaseTask):
                 self.events.emit(Events.LOGIN_FAILED, task_id=self.id, attempt=attempt)
                 if self.note_login_failure(f"登录未成功{hint}") >= limit:
                     break   # 预算用尽：不再继续尝试（跨天也不会自动恢复）
-                await self.open_site(self.LOGIN_URL)
+                await self.open_site(login_url)
             except Exception as e:
                 self.logger.warning(f"登录尝试 {attempt} 异常: {e}")
                 try:
-                    await self.open_site(self.LOGIN_URL)
+                    await self.open_site(login_url)
                 except Exception:
                     pass
 
@@ -298,6 +303,7 @@ class AkileTask(BaseTask):
             # 兜底：点第一格后整体输入（组件通常会自动跳格）
             try:
                 first = page.locator(self.SEL_2FA_BOX).first
+                await browser.action_pause()
                 await first.click()
                 await page.keyboard.type(code, delay=80)
                 filled = 6
@@ -314,6 +320,7 @@ class AkileTask(BaseTask):
                 if not await btn.is_disabled():
                     break
                 await browser.wait_timeout(400)      # 6 格填满后按钮才启用
+            await browser.action_pause()
             await btn.click()
             self.log("已点击 2FA「继续」")
         except Exception as e:
@@ -326,6 +333,7 @@ class AkileTask(BaseTask):
         try:
             loc = self.ctx.browser.page.locator(self.SEL_PASSKEY_SKIP).first
             if await loc.count() and await loc.is_visible():
+                await self.ctx.browser.action_pause()
                 await loc.click()
                 self.log("已跳过 Passkey 添加提示（下次一定）")
                 await self.ctx.browser.wait_timeout(1200)
@@ -350,6 +358,7 @@ class AkileTask(BaseTask):
                             "button:has-text('关闭')"):
                     loc = modal.locator(sel).first
                     if await loc.count() and await loc.is_visible():
+                        await self.ctx.browser.action_pause()
                         await loc.click()
                         closed = True
                         break
@@ -416,6 +425,7 @@ class AkileTask(BaseTask):
     async def _click_checkin(self, btn_sel: str) -> bool:
         """点击签到按钮；被弹窗挡住时不要干等 Playwright 默认的 30 秒超时"""
         try:
+            await self.ctx.browser.action_pause()
             await self.ctx.browser.page.locator(btn_sel).first.click(timeout=6000)
             return True
         except Exception as e:
@@ -424,7 +434,9 @@ class AkileTask(BaseTask):
 
     async def do_checkin(self) -> tuple[bool, str]:
         browser = self.ctx.browser
-        url = (self.cfg.options.get("checkin_url") or self.CHECKIN_URL).strip()
+        url = await self.checkin_page_url()
+        if not url:
+            raise TaskError("控制台地址为空：请检查任务配置里的 task.url / options.checkin_url")
         self.log(f"进入控制台: {url}")
         await browser.goto(url)
         await browser.wait_timeout(3000)     # SPA 渲染

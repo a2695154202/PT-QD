@@ -181,6 +181,7 @@ class MTeamTask(BaseTask):
         browser = self.ctx.browser
         await self.prepare_cookies()
         await browser.goto(self.cfg.url)
+        await self.note_site_origin()
         await browser.wait_timeout(3500)  # 等待单页应用渲染
 
         if await self.has_login_form():
@@ -229,7 +230,7 @@ class MTeamTask(BaseTask):
                     await browser.wait_timeout(3000)
                     if not await self.has_login_form():
                         continue
-                await browser.wait_selector(self.SEL_USERNAME, timeout=10000)
+                await browser.wait_selector(self.SEL_USERNAME)
                 await browser.fill(self.SEL_USERNAME, username)
                 await browser.fill(self.SEL_PASSWORD, password)
                 await browser.click(self.SEL_LOGIN_BTN)
@@ -301,6 +302,7 @@ class MTeamTask(BaseTask):
             # 部分实现会在输入满 6 位后自动提交
             self.logger.warning("未找到 2FA 提交按钮，尝试回车提交")
             try:
+                await browser.action_pause()
                 await browser.page.keyboard.press("Enter")
             except Exception:
                 pass

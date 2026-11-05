@@ -1,10 +1,12 @@
 """任务管理器：发现配置 -> 组装上下文 -> 执行任务 -> 收尾（日志落盘 + 关闭浏览器）"""
 from __future__ import annotations
 
+import asyncio
 from typing import Optional
 
 from core.ai import AIClient
 from core.browser import BrowserController
+from core import net
 from core.captcha import CaptchaSolver
 from core.cf import CFHandler
 from core.config import AppConfig, TaskConfig, load_task_configs, LOG_DIR, _abs
@@ -12,14 +14,18 @@ from core.cookiecloud import CookieCloudClient
 from core.events import EventBus
 from core.logger import current_run_log, get_logger, setup_logging, start_run_log, stop_run_log
 from core.state import record_result
-from .base import BaseTask, TaskContext, TaskResult, load_registry
+from core.telegram import TelegramNotifier, summarize
+from .base import (BaseTask, TaskContext, TaskResult, load_registry,
+                   split_known_configs)
 
 
 class TaskManager:
     def __init__(self, app_cfg: Optional[AppConfig] = None):
         self.app_cfg = app_cfg or AppConfig.load()
         setup_logging(self.app_cfg.log_level, _abs(self.app_cfg.log_file))
+        net.configure(self.app_cfg.proxy)      # AI/CookieCloud 请求同样不用系统代理
         self.logger = get_logger()
+        self.logger.info(f"网络策略：{net.describe()}")
         self.events = EventBus()
         self._browser: Optional[BrowserController] = None
         self._ai: Optional[AIClient] = None
@@ -61,11 +67,11 @@ class TaskManager:
     # ---------- 任务发现 ----------
     def discover(self) -> list[TaskConfig]:
         """扫描 config/tasks/ 下的任务配置，并校验是否有对应实现"""
-        registry = load_registry()
-        configs = load_task_configs()
-        for cfg in configs:
-            if cfg.id not in registry:
-                self.logger.warning(f"任务 [{cfg.id}] 有配置但未找到实现类")
+        configs, stale = split_known_configs(load_task_configs())
+        for cfg in stale:
+            self.logger.warning(
+                f"任务 [{cfg.id}] 在当前版本已下线，配置已忽略"
+                f"（可删除 config/tasks/{cfg.id}.yaml）")
         return configs
 
     def create_task(self, cfg: TaskConfig) -> BaseTask:
@@ -92,17 +98,21 @@ class TaskManager:
     def _network_for(self, task_cfg: TaskConfig) -> tuple[Optional[dict], bool]:
         """按任务决定网络：返回 (proxy, no_proxy)。
 
-        - 全局未配置代理：跟随系统（None, False）
-        - 任务勾选「走代理」：使用全局代理
-        - 任务未勾选：强制直连（--no-proxy-server），不走任何代理
+        **任何情况下都不使用 Windows 系统代理**（开着代理/VPN 的电脑会因此超时，
+        而用户自己用浏览器打开却是正常的）：
+        - 用户配置了全局代理 且 本任务勾选「走代理」→ 走该代理
+        - 其余情况（没配代理 / 或配了但本任务没勾选）→ 强制直连（--no-proxy-server）
         """
         p = self.app_cfg.proxy
-        if not p.ready:
-            return None, False
-        if task_cfg.use_proxy:
-            self.logger.info(f"任务 [{task_cfg.name}] 使用全局代理 {p.server}")
+        if p.ready and task_cfg.use_proxy:
+            self.logger.info(f"任务 [{task_cfg.name}] 走用户配置的代理 {p.server}")
             return p.for_playwright(), False
-        self.logger.info(f"任务 [{task_cfg.name}] 未勾选代理，强制直连")
+        if p.ready:
+            self.logger.info(
+                f"任务 [{task_cfg.name}] 未勾选「走代理」，强制直连（不使用系统代理）")
+        else:
+            self.logger.info(
+                f"任务 [{task_cfg.name}] 未配置全局代理，强制直连（不使用系统代理）")
         return None, True
 
     async def _run_one(self, task_id: str) -> TaskResult:
@@ -158,6 +168,7 @@ class TaskManager:
                     await self.close()
             finally:
                 self._queue_running = False
+        await self.notify_summary([result])
         return result
 
     async def run_tasks(self, task_ids: list[str], close_browser: bool = True) -> list[TaskResult]:
@@ -187,7 +198,27 @@ class TaskManager:
                 self.logger.info("任务队列全部结束，关闭浏览器")
                 await self.close()
             self._queue_running = False
+        await self.notify_summary(results)
         return results
+
+    # ---------- Telegram 汇总 ----------
+    async def notify_summary(self, results: list[TaskResult]) -> None:
+        """把本次结果汇总推到 Telegram；未配置/发送失败都只记日志，不影响任务结果"""
+        cfg = self.app_cfg.telegram
+        if not results or not cfg.ready:
+            return
+        if cfg.only_on_failure and all(r.success for r in results):
+            self.logger.info("Telegram 设置为「仅失败时推送」，本次全部成功，跳过推送")
+            return
+        names = {c.id: c.name for c in self.discover()}
+        rows = [(names.get(r.task_id, r.task_id), r.success, r.message) for r in results]
+        try:
+            text = summarize(rows)
+            notifier = TelegramNotifier(cfg)
+            await asyncio.to_thread(notifier.send, text)
+            self.logger.info(f"签到汇总已推送到 Telegram（{len(rows)} 个任务）")
+        except Exception as e:
+            self.logger.warning(f"Telegram 汇总推送失败（不影响签到结果）: {e}")
 
     async def run_all(self, only_enabled: bool = True) -> list[TaskResult]:
         ids = [c.id for c in self.discover() if (c.enabled or not only_enabled)]

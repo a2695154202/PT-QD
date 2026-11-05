@@ -23,9 +23,12 @@ if not getattr(sys, "frozen", False):
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from core.ai import AIClient
+from core import net
 from core.config import AppConfig, TaskConfig, TASKS_CONFIG_DIR, load_task_configs, _abs
 from core.cookiecloud import CookieCloudClient
 from core.logger import setup_logging
+from core.telegram import TelegramNotifier
+from tasks.base import split_known_configs
 from tasks.manager import TaskManager
 
 
@@ -56,14 +59,18 @@ def _print_task_table(configs) -> None:
 
 
 def cmd_list(args) -> None:
-    _print_task_table(load_task_configs())
+    configs, stale = split_known_configs(load_task_configs())
+    _print_task_table(configs)
+    for cfg in stale:
+        print(f"[提示] 任务 {cfg.id} 在当前版本已下线，配置已忽略"
+              f"（可删除 config/tasks/{cfg.id}.yaml）")
 
 
 async def _run_async(args) -> int:
     if not args.all and not args.task_id:
         print("请指定任务 ID（例如 python main.py run pt_kong），或用 --all 运行所有启用任务")
         print()
-        _print_task_table(load_task_configs())
+        _print_task_table(split_known_configs(load_task_configs())[0])
         return 2
     manager = TaskManager()
     try:
@@ -161,6 +168,22 @@ def cmd_test_cookiecloud(args) -> None:
     sys.exit(0 if ok else 1)
 
 
+def cmd_test_telegram(args) -> None:
+    cfg = AppConfig.load()
+    tcfg = cfg.telegram
+    if not tcfg.ready:
+        print("Telegram 未启用：请在「全局设置 → 通知」里填写 bot_token / chat_id 并勾选启用")
+        sys.exit(1)
+    via = "代理" if tcfg.use_proxy else "直连"
+    print(f"正在发送测试消息（{via}）…")
+    try:
+        TelegramNotifier(tcfg).send_text("配置正常，签到汇总会推送到这个会话。")
+    except Exception as e:
+        print(f"发送失败: {e}")
+        sys.exit(1)
+    print("发送成功，请到 Telegram 查看")
+
+
 def cmd_show_config(args) -> None:
     cfg = AppConfig.load()
     print(f"浏览器模式     : {cfg.browser.mode}"
@@ -169,6 +192,9 @@ def cmd_show_config(args) -> None:
     print(f"用户数据目录   : {cfg.browser.user_data_dir_abs}")
     print(f"AI             : {'已启用' if cfg.ai.enabled else '未启用'} | {cfg.ai.base_url} | model={cfg.ai.model}")
     print(f"CookieCloud    : {'已启用' if cfg.cookiecloud.enabled else '未启用'} | {cfg.cookiecloud.server}")
+    tg = cfg.telegram
+    print(f"Telegram       : {'已启用' if tg.ready else '未启用'} | chat={tg.chat_id or '-'}"
+          f" | {'走代理' if tg.use_proxy else '直连'}")
     print(f"日志           : {_abs(cfg.log_file)} ({cfg.log_level})")
     print()
     _print_task_table(load_task_configs())
@@ -229,6 +255,7 @@ def main() -> None:
 
     sub.add_parser("test-ai", help="测试 AI 配置").set_defaults(func=cmd_test_ai)
     sub.add_parser("test-cookiecloud", help="测试 CookieCloud 连接").set_defaults(func=cmd_test_cookiecloud)
+    sub.add_parser("test-telegram", help="发送一条 Telegram 测试消息").set_defaults(func=cmd_test_telegram)
     sub.add_parser("show-config", help="查看当前配置").set_defaults(func=cmd_show_config)
     sub.add_parser("gui", help="启动图形界面").set_defaults(func=cmd_gui)
 
@@ -238,6 +265,7 @@ def main() -> None:
     # 导致双击 exe 时没有 data/logs/app.log，也没有运行日志目录
     cfg = AppConfig.load()
     setup_logging(cfg.log_level, _abs(cfg.log_file))
+    net.configure(cfg.proxy)   # 所有 HTTP 请求统一：不用系统代理，只用用户配置的代理
 
     if not args.command:
         # 无参数（如 exe 双击）→ 启动图形界面

@@ -49,7 +49,7 @@ class TTGTask(NexusPHPTask):
     )
 
     # ---- 签到 ----
-    CHECKIN_URL = "https://site-c.example/index.php"
+    CHECKIN_URL = "/index.php"             # 只写路径，域名跟随 task.url
     SEL_CHECKIN_LINK = "#signed"
 
     ALREADY_KEYWORDS = ("已签到", "已经签到", "今日已签到", "已经签过", "签到过了")
@@ -69,16 +69,23 @@ class TTGTask(NexusPHPTask):
 
     async def do_checkin(self) -> tuple[bool, str]:
         browser = self.ctx.browser
-        url = (self.cfg.options.get("checkin_url") or self.CHECKIN_URL or self.cfg.url).strip()
+        url = await self.checkin_page_url()
+        if not url:
+            raise TaskError("签到页地址为空：请检查任务配置里的 task.url / options.checkin_url")
         self.log(f"进入签到页: {url}")
         await browser.goto(url)
         await browser.wait_timeout(1000)
         if self.cfg.has_cf:
             passed = await self.ctx.cf.solve()
             if not passed:
-                raise TaskError(
-                    "Cloudflare 人机验证未通过（等待超时），可改用 attach 模式人工完成一次验证"
-                )
+                # 超时不等于站点不可用：签到页正文正常或签到入口已出现就继续
+                looks_ok = bool((await self.page_text()).strip()) or \
+                    bool(await browser.page.query_selector(self.SEL_CHECKIN_LINK))
+                if not looks_ok:
+                    raise TaskError(
+                        "Cloudflare 人机验证未通过（等待超时），可改用 attach 模式人工完成一次验证"
+                    )
+                self.log("CF 等待超时，但签到页已能正常显示，继续后续判定")
 
         body = await self.page_text()
         signed_text = await self._signed_state()
@@ -88,7 +95,8 @@ class TTGTask(NexusPHPTask):
         page = browser.page
         link = page.locator(self.SEL_CHECKIN_LINK).first
         try:
-            await link.wait_for(state="visible", timeout=10000)
+            # 慢机器上首屏脚本还没跑完时入口可能晚出现：用默认超时（可在配置里调大）
+            await browser.wait_locator(link)
         except PWTimeout:
             if self._has_kw(body, self.SUCCESS_KEYWORDS):
                 return True, "签到成功"
@@ -113,6 +121,7 @@ class TTGTask(NexusPHPTask):
         page.on("dialog", _on_dialog)
         try:
             self.log("点击签到链接（#signed）")
+            await browser.action_pause()
             await link.click()
             self.events.emit(Events.CHECKIN_CLICKED, task_id=self.id)
             await browser.wait_timeout(3000)

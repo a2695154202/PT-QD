@@ -20,6 +20,6 @@ options:
   has_cf: false                 # 实测未遇到 Cloudflare 挑战；如遇到可改为 true
   use_proxy: false
   max_login_retry: 2            # 登录失败次数上限（跨天累计，只有登录成功才清零）
-  checkin_url: "https://site-g.example/attendance.php"
+  checkin_url: "/attendance.php"    # 只写路径，域名自动跟随 task.url（站点换域名时只改 url）
   stay_seconds: 5               # 在签到页停留的秒数（打开即签到，停留够时间再判定）
   schedule_time: "09:30"

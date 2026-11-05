@@ -17,6 +17,7 @@ from datetime import datetime
 from tkinter import filedialog, messagebox, ttk
 
 from core.config import AppConfig, load_task_configs
+from core import net
 from core.logger import get_logger
 from core.scheduler import (describe, normalize_hhmm, normalize_tasks,
                             pick_scheduled, should_run)
@@ -25,6 +26,7 @@ from core.state import (is_signed, login_fail_info, load_state, record_date,
                         set_schedule_last_run, today_str)
 from core.twofa_store import TwoFactorVault
 from tasks.manager import TaskManager
+from tasks.base import split_known_configs
 
 LOGGER = get_logger()
 
@@ -176,8 +178,8 @@ class TaskEditDialog(tk.Toplevel):
         px = ttk.Labelframe(frm, text="代理", padding=8)
         px.pack(fill="x", pady=(0, 8))
         self.var_use_proxy = tk.BooleanVar()
-        tk.Checkbutton(px, text="本任务走代理（使用「全局设置 → 代理」中的地址；"
-                                "不勾选则本任务强制直连，不走代理）",
+        tk.Checkbutton(px, text="本任务走代理（使用「全局设置 → 代理」中的地址）\n"
+                                "不勾选则本任务强制直连；任何情况下都不会使用 Windows 系统代理",
                        variable=self.var_use_proxy, wraplength=480,
                        justify="left").grid(row=0, column=0, sticky="w", **pad)
         self.lbl_proxy_state = ttk.Label(px, text="", foreground="gray", font=("", 8))
@@ -396,6 +398,35 @@ class SettingsDialog(tk.Toplevel):
                   foreground="gray", font=("", 8), justify="left").grid(
             row=5, column=0, columnspan=2, sticky="w", **pad)
 
+        # --- 通知（Telegram） ---
+        tab_tg = ttk.Frame(nb, padding=8)
+        nb.add(tab_tg, text="通知")
+        self.tg_enabled = tk.BooleanVar()
+        self.tg_token = tk.StringVar()
+        self.tg_chat = tk.StringVar()
+        self.tg_proxy = tk.BooleanVar(value=True)
+        self.tg_only_fail = tk.BooleanVar(value=False)
+        ttk.Checkbutton(tab_tg, text="启用 Telegram 通知（每次跑完推送签到汇总）",
+                        variable=self.tg_enabled).grid(row=0, column=0, columnspan=2, sticky="w", **pad)
+        ttk.Label(tab_tg, text="Bot Token").grid(row=1, column=0, sticky="w", **pad)
+        ttk.Entry(tab_tg, textvariable=self.tg_token, width=48,
+                  show="*").grid(row=1, column=1, sticky="w", **pad)
+        ttk.Label(tab_tg, text="Chat ID").grid(row=2, column=0, sticky="w", **pad)
+        ttk.Entry(tab_tg, textvariable=self.tg_chat, width=28).grid(row=2, column=1, sticky="w", **pad)
+        ttk.Label(tab_tg, text="个人填数字 id（发给 @userinfobot 获取）；群组填负数，如 -1001234567890",
+                  foreground="gray", font=("", 8)).grid(row=3, column=1, sticky="w", **pad)
+        ttk.Checkbutton(tab_tg, text="走代理（默认开启：api.telegram.org 国内直连不通）",
+                        variable=self.tg_proxy).grid(row=4, column=0, columnspan=2, sticky="w", **pad)
+        ttk.Checkbutton(tab_tg, text="只在有任务失败时推送",
+                        variable=self.tg_only_fail).grid(row=5, column=0, columnspan=2, sticky="w", **pad)
+        ttk.Button(tab_tg, text="发送测试消息", command=self._test_telegram).grid(
+            row=6, column=1, sticky="w", **pad)
+        ttk.Label(tab_tg,
+                  text="用法：@BotFather 建 bot 拿 token → 先给 bot 发一条消息 → 把 chat_id 填进来。\n"
+                       "「走代理」复用「代理」页里配置的地址；没配代理时会直连并提示。",
+                  foreground="gray", font=("", 8), justify="left").grid(
+            row=7, column=0, columnspan=2, sticky="w", **pad)
+
         # --- 定时 ---
         tab_sc = ttk.Frame(nb, padding=8)
         nb.add(tab_sc, text="定时运行")
@@ -521,6 +552,11 @@ class SettingsDialog(tk.Toplevel):
         self.px_server.set(c.proxy.server)
         self.px_user.set(c.proxy.username)
         self.px_pass.set(c.proxy.password)
+        self.tg_enabled.set(c.telegram.enabled)
+        self.tg_token.set(c.telegram.bot_token)
+        self.tg_chat.set(c.telegram.chat_id)
+        self.tg_proxy.set(c.telegram.use_proxy)
+        self.tg_only_fail.set(c.telegram.only_on_failure)
         self.sc_enabled.set(bool(getattr(c, "schedule", None) and c.schedule.enabled))
         self.sc_time.set(getattr(getattr(c, "schedule", None), "time", "09:30") or "09:30")
         self.sc_skip_signed.set(bool(getattr(getattr(c, "schedule", None), "skip_signed", True)))
@@ -529,6 +565,33 @@ class SettingsDialog(tk.Toplevel):
         chosen = set(saved) if saved else set(self.sc_task_vars)   # 空=全部
         for tid, var in self.sc_task_vars.items():
             var.set(tid in chosen if chosen else True)
+
+    def _test_telegram(self):
+        """用当前填写的 token/chat 立即发一条测试消息（不落盘）"""
+        from core.config import ProxyConfig, TelegramConfig
+        from core.telegram import TelegramNotifier
+
+        token = self.tg_token.get().strip()
+        chat = self.tg_chat.get().strip()
+        if not token or not chat:
+            messagebox.showerror("缺少配置", "请先填写 Bot Token 和 Chat ID")
+            return
+        cfg = TelegramConfig(enabled=True, bot_token=token, chat_id=chat,
+                             use_proxy=bool(self.tg_proxy.get()))
+        net.configure(ProxyConfig(enabled=bool(self.px_enabled.get()),
+                                  server=self.px_server.get().strip(),
+                                  username=self.px_user.get().strip(),
+                                  password=self.px_pass.get()))
+
+        def work():
+            try:
+                TelegramNotifier(cfg).send_text("配置正常，签到汇总会推送到这个会话。")
+                self.after(0, lambda: messagebox.showinfo("发送成功", "已发送，请到 Telegram 查看"))
+            except Exception as e:
+                msg = str(e)
+                self.after(0, lambda: messagebox.showerror("发送失败", msg))
+
+        threading.Thread(target=work, daemon=True).start()
 
     def _save(self):
         c = self.cfg
@@ -551,6 +614,11 @@ class SettingsDialog(tk.Toplevel):
         c.proxy.server = self.px_server.get().strip()
         c.proxy.username = self.px_user.get().strip()
         c.proxy.password = self.px_pass.get()
+        c.telegram.enabled = bool(self.tg_enabled.get())
+        c.telegram.bot_token = self.tg_token.get().strip()
+        c.telegram.chat_id = self.tg_chat.get().strip()
+        c.telegram.use_proxy = bool(self.tg_proxy.get())
+        c.telegram.only_on_failure = bool(self.tg_only_fail.get())
         # 定时运行：启用时必须填合法时间（HH:MM）
         sc_time = normalize_hhmm(self.sc_time.get(), default="")
         if not sc_time:
@@ -578,7 +646,8 @@ class SettingsDialog(tk.Toplevel):
             pass
         try:
             path = c.save()
-            LOGGER.info(f"全局设置已保存: {path}")
+            net.configure(c.proxy)     # 代理改动立即对 AI/CookieCloud 请求生效
+            LOGGER.info(f"全局设置已保存: {path}（网络策略：{net.describe()}）")
             if self.on_saved:
                 self.on_saved()
             self.destroy()
@@ -740,6 +809,11 @@ class SigninApp:
                       justify="left").pack(anchor="w")
             self.status.set("读取任务配置失败")
             return
+        # 已下线的任务（例如旧版「人人」）即使还留着 yaml 也不再显示
+        configs, stale = split_known_configs(configs)
+        for cfg in stale:
+            LOGGER.warning(f"任务 [{cfg.id}] 在当前版本已下线，配置已忽略"
+                           f"（可删除 config/tasks/{cfg.id}.yaml）")
         st = load_state()
         if not configs:
             ttk.Label(self.task_frame, text="config/tasks/ 下没有任务配置").pack(anchor="w")
@@ -790,6 +864,14 @@ class SigninApp:
                               foreground="gray", font=("", 8)).pack(anchor="w")
         except Exception:
             pass
+        if stale:
+            names = "、".join(
+                c.id if (c.name or c.id) == c.id else f"{c.name}（{c.id}）" for c in stale)
+            ttk.Label(self.task_frame,
+                      text=f"已忽略 {len(stale)} 个本版本已下线的任务配置：{names}\n"
+                           "如需彻底清掉，删除 config/tasks/ 下对应的 yaml 即可。",
+                      foreground="#8d6e63", wraplength=560, justify="left",
+                      font=("", 8)).pack(anchor="w", pady=(6, 0))
         self.status.set(f"已加载 {len(configs)} 个任务")
 
     def edit_task(self, task_id: str):

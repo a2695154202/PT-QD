@@ -19,6 +19,7 @@ import requests
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.padding import PKCS7
 
+from . import net
 from .config import CookieCloudConfig
 from .logger import get_logger
 
@@ -61,7 +62,7 @@ class CookieCloudClient:
             raise CookieCloudError("CookieCloud 未配置 server/uuid")
         url = self.cfg.server.rstrip("/") + "/get/" + self.cfg.uuid
         try:
-            resp = requests.get(url, timeout=20)
+            resp = net.request("GET", url, timeout=20)
             resp.raise_for_status()
             return resp.json()
         except requests.RequestException as e:

@@ -28,7 +28,7 @@ hiddenimports = [
     "core.config", "core.logger", "core.state", "core.scheduler", "core.captcha",
     "core.browser_bridge", "core.desktop", "core.desktop_agent",
     "tasks.base", "tasks.manager", "tasks.nexusphp",
-    "tasks.pt_kong", "tasks.hddolby", "tasks.ttg", "tasks.mteam", "tasks.audiences",
+    "tasks.pt_kong", "tasks.hddolby", "tasks.ttg", "tasks.mteam",
     "tasks.akile", "tasks.hhan",
     "ui.gui",
     "cryptography.hazmat.primitives.ciphers",

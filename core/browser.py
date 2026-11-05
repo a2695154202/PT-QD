@@ -20,6 +20,7 @@ from playwright.async_api import (
     Browser,
     BrowserContext,
     Page,
+    TimeoutError as PWTimeout,
 )
 
 from .config import BrowserConfig, _abs
@@ -81,8 +82,9 @@ class BrowserController:
         """启动/复用浏览器。
 
         proxy    : 代理配置（{"server": "http://127.0.0.1:7890", ...}）
-        no_proxy : True 时以 --no-proxy-server 启动，完全不走代理（含系统代理）
-        两者都不传 = 跟随系统代理设置
+        no_proxy : 强制直连标记（不传 proxy 时一律直连）
+        本程序**从不使用 Windows 系统代理**：没给 proxy 就一定加 --no-proxy-server，
+        否则开着代理/VPN 的电脑上会出现「页面看着能开、任务却一直超时」。
         """
         key = (tuple(sorted((proxy or {}).items())) if proxy else None, bool(no_proxy))
         if self.is_running:
@@ -92,22 +94,23 @@ class BrowserController:
             await self.stop()
         self._network_key = key
         self._active_proxy = proxy or None
-        self._no_proxy = bool(no_proxy)
+        self._no_proxy = bool(no_proxy) or not proxy
         self._pw = await async_playwright().start()
         if self.cfg.mode == "attach":
             await self._attach()
         else:
-            await self._launch(proxy, no_proxy)
+            await self._launch(proxy, self._no_proxy)
         self.events.emit(Events.BROWSER_READY, mode=self.cfg.mode)
-        net = f"代理 {proxy['server']}" if proxy else ("强制直连" if no_proxy else "跟随系统")
-        self.logger.info(f"浏览器已就绪（模式: {self.cfg.mode}，网络: {net}）")
+        where = f"代理 {proxy['server']}" if proxy else "直连（不使用系统代理）"
+        self.logger.info(f"浏览器已就绪（模式: {self.cfg.mode}，网络: {where}）")
         return self
 
     async def _launch(self, proxy: Optional[dict] = None, no_proxy: bool = False) -> None:
         self.screenshot_dir.mkdir(parents=True, exist_ok=True)
         args = [f"--remote-debugging-port={self.cfg.debugging_port}"] + LAUNCH_ARGS
-        if no_proxy:
-            args.append("--no-proxy-server")  # 忽略系统代理，直连
+        if not proxy:
+            # 没指定代理 → 一律忽略 Windows 系统代理（PAC/IE 设置）
+            args.append("--no-proxy-server")
         if self.cfg.fullscreen:
             args.append("--start-fullscreen")
         kwargs = dict(
@@ -249,33 +252,81 @@ class BrowserController:
 
     async def goto(self, url: str, wait_until: str = "domcontentloaded") -> None:
         self.logger.info(f"打开页面: {url}")
-        await self.page.goto(url, wait_until=wait_until, timeout=self.cfg.default_timeout)
+        await self.action_pause()
+        timeout = max(int(getattr(self.cfg, "nav_timeout", 0) or 0), self.cfg.default_timeout)
+        try:
+            await self.page.goto(url, wait_until=wait_until, timeout=timeout)
+        except PWTimeout:
+            # 慢机器 / CF 托管挑战：domcontentloaded 迟迟不触发，但页面其实已经能用了。
+            # 只要地址已经变成 http(s)，就不让这一步把整个任务判失败（后续按页面内容判定）。
+            current = ""
+            try:
+                current = self.page.url or ""
+            except Exception:
+                pass
+            if not current.startswith("http"):
+                raise
+            self.logger.warning(
+                f"页面 {timeout / 1000:.0f}s 内未完全加载（{url}），"
+                f"当前已在 {current}，按已打开继续后续判定"
+            )
+            try:
+                await self.page.wait_for_timeout(1500)
+            except Exception:
+                pass
         self.events.emit(Events.PAGE_LOADED, url=self.page.url)
         if not self._topmost_applied:
             # 页面加载后窗口标题才带有站点信息，此时置顶最可靠
             self.apply_topmost()
             self._topmost_applied = True
 
+    async def action_pause(self) -> None:
+        """动作前的拟人小延时（带随机抖动），由 browser.action_delay_ms 控制。
+
+        任务里直接用 page.locator(...).click() 的地方也应先调用一次。
+        """
+        base = int(getattr(self.cfg, "action_delay_ms", 0) or 0)
+        if base <= 0:
+            return
+        try:
+            await self.page.wait_for_timeout(max(1, int(base * random.uniform(0.6, 1.5))))
+        except Exception:
+            pass
+
     async def reload(self, wait_until: str = "domcontentloaded") -> None:
-        await self.page.reload(wait_until=wait_until, timeout=self.cfg.default_timeout)
+        timeout = max(int(getattr(self.cfg, "nav_timeout", 0) or 0), self.cfg.default_timeout)
+        await self.action_pause()
+        try:
+            await self.page.reload(wait_until=wait_until, timeout=timeout)
+        except PWTimeout:
+            self.logger.warning(f"刷新 {timeout / 1000:.0f}s 内未完成，按当前页面继续")
         self.events.emit(Events.PAGE_LOADED, url=self.page.url)
 
     async def wait_selector(self, selector: str, timeout: Optional[int] = None,
                             state: str = "visible"):
+        """等元素出现（超时时间取 default_timeout，慢机器可在配置里调大）"""
         return await self.page.wait_for_selector(
             selector, timeout=timeout or self.cfg.default_timeout, state=state
         )
+
+    async def wait_locator(self, locator, timeout: Optional[int] = None,
+                           state: str = "visible"):
+        """等 locator 到达指定状态（给直接用 locator 的任务用，超时同 wait_selector）"""
+        await locator.wait_for(state=state, timeout=timeout or self.cfg.default_timeout)
+        return locator
 
     async def wait_timeout(self, ms: int) -> None:
         await self.page.wait_for_timeout(ms)
 
     async def click(self, selector: str, timeout: Optional[int] = None) -> None:
+        await self.action_pause()
         await self.page.click(selector, timeout=timeout or self.cfg.default_timeout)
 
     async def human_click(self, selector: str, timeout: Optional[int] = None) -> None:
         """拟人点击：先移动鼠标到元素附近（模拟轨迹），再由 Playwright 执行可靠点击"""
+        await self.action_pause()
         locator = self.page.locator(selector).first
-        await locator.wait_for(state="visible", timeout=timeout or self.cfg.default_timeout)
+        await self.wait_locator(locator, timeout=timeout)
         try:
             box = await locator.bounding_box()
             if box:
@@ -289,6 +340,7 @@ class BrowserController:
         await locator.click(timeout=timeout or self.cfg.default_timeout)
 
     async def fill(self, selector: str, value: str, timeout: Optional[int] = None) -> None:
+        await self.action_pause()
         await self.page.fill(selector, value, timeout=timeout or self.cfg.default_timeout)
 
     async def evaluate(self, script: str):

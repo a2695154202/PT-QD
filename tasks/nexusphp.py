@@ -36,7 +36,7 @@ class NexusPHPTask(BaseTask):
     )
 
     # ---- 签到页与按钮 ----
-    CHECKIN_URL = ""                    # 签到页地址（也可用 options.checkin_url 覆盖）
+    CHECKIN_URL = ""                    # 签到页路径（可写绝对地址，域名会按 task.url 重挂）
     SEL_CHECKIN_BTN = ""                # 签到按钮选择器（也可用 options.checkin_btn 覆盖）
     # 只探测"提交签到"类控件；导航入口链接不作为签到按钮（点击它只跳转，不代表签到完成）
     CHECKIN_BTN_CANDIDATES = (
@@ -116,10 +116,18 @@ class NexusPHPTask(BaseTask):
     # ---------- 页面与 Cookie ----------
     async def open_site(self) -> None:
         await self.ctx.browser.goto(self.cfg.url)
+        # 记下本次导航真实落地的站点域名（站点 301 换域名时，签到页/登录页跟着走）
+        await self.note_site_origin()
         if self.cfg.has_cf:
             passed = await self.ctx.cf.solve()
             if not passed:
-                # 直接终止，避免后续流程反复重开站点、反复等待同一挑战
+                # solve 超时不等于站点不能用：有的站点挑战页残留 / 判定偏严，
+                # 但登录表单或已登录标志其实已经出现 → 继续，避免「页面好好的却报超时」
+                await self.ctx.browser.wait_timeout(800)
+                if await self.is_logged_in() or await self.has_login_form():
+                    self.log("CF 等待超时，但页面已可用（登录表单/登录态已出现），继续后续流程")
+                    return
+                # 页面确实不可用：直接终止，避免后续反复重开站点、反复等同一挑战
                 raise TaskError(
                     "Cloudflare 人机验证未通过（等待超时）。该站点对自动化浏览器校验较严，"
                     "可把浏览器模式改为 attach 人工完成一次验证，"
@@ -209,7 +217,11 @@ class NexusPHPTask(BaseTask):
             url, title = "", ""
         if url.startswith("chrome-error://") or "ERR_" in title or "无法访问" in title \
                 or "This site can" in title:
-            raise TaskError(f"站点无法访问（{title or url}），请检查网络或代理设置")
+            raise TaskError(
+                f"站点无法访问（{title or url}），请检查网络或代理设置；"
+                f"如果站点已经更换域名，请把任务配置里的 task.url 改成新域名"
+                f"（当前为 {self.cfg.url or '未填写'}），签到页/登录页会自动跟随"
+            )
         raise TaskError("无法识别页面状态（既非登录页也非已登录页），请查看运行截图确认站点是否正常")
 
     async def login_with_password(self) -> bool:
@@ -240,7 +252,7 @@ class NexusPHPTask(BaseTask):
                         continue
 
                 self.log(f"第 {attempt}/{remaining} 次登录尝试（累计失败 {self.login_used()}/{limit}）")
-                await browser.wait_selector(self.SEL_USERNAME, timeout=8000)
+                await browser.wait_selector(self.SEL_USERNAME)
                 await browser.fill(self.SEL_USERNAME, username)
                 await browser.fill(self.SEL_PASSWORD, password)
 
@@ -354,7 +366,9 @@ class NexusPHPTask(BaseTask):
 
     async def do_checkin(self) -> tuple[bool, str]:
         browser = self.ctx.browser
-        url = (self.cfg.options.get("checkin_url") or self.CHECKIN_URL or self.cfg.url).strip()
+        url = await self.checkin_page_url()
+        if not url:
+            raise TaskError("签到页地址为空：请检查任务配置里的 task.url / options.checkin_url")
         self.log(f"进入签到页: {url}")
         await browser.goto(url)
         await browser.wait_timeout(1200)

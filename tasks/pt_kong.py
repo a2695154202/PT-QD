@@ -170,7 +170,8 @@ class PTKongTask(BaseTask):
             return False, "签到前检测到仍处于未登录状态"
 
         try:
-            await browser.wait_selector(self.SEL_SHOWUP, timeout=10000)
+            # 不写死短超时：慢机器/CF 之后首屏渲染慢，统一用 default_timeout
+            await browser.wait_selector(self.SEL_SHOWUP)
         except PWTimeout:
             # HDSky 签到成功后会把「签到」入口移除，此时页面显示「已签到」
             body = await self.page_text()
@@ -180,32 +181,53 @@ class PTKongTask(BaseTask):
                 return True, "今日已签到（签到入口已消失）"
             return False, "未找到签到按钮（#showup），可能未登录或页面结构变化"
 
-        # 等页面脚本（jQuery）就绪，否则点击时签到事件可能还没绑定
-        try:
-            await browser.page.wait_for_function("() => typeof jQuery !== 'undefined'", timeout=8000)
-        except Exception:
-            self.logger.warning("等待 jQuery 就绪超时，继续尝试点击")
+        # 签到成功后站点会把入口文字改成「已签到(Showed Up)」，此时不必再点
+        if await self.showup_text_signed():
+            return True, "今日已签到（无需重复）"
 
-        # 点击签到，弹窗未出现时重试
+        # 等签到事件真正绑定好：只等 jQuery 加载完还不够，common.js 的
+        # jQuery(function(){...}) 要等 DOM ready 才给 #showup 挂 click
+        if not await self.wait_showup_ready():
+            self.logger.warning("未能确认签到事件已绑定（jQuery/layer 可能未加载完），仍尝试点击")
+
+        # 点击签到，弹窗未出现时重试；点击本身失败也要兜底，不能直接抛错
         popup_ok = False
-        for attempt in range(1, 3):
-            await browser.human_click(self.SEL_SHOWUP)
-            self.events.emit(Events.CHECKIN_CLICKED, task_id=self.id)
-            self.log(f"已点击签到按钮（第 {attempt} 次），等待验证码弹窗")
+        for attempt in range(1, 4):
+            clicked = await self.click_showup(attempt)
+            if clicked:
+                self.events.emit(Events.CHECKIN_CLICKED, task_id=self.id)
+                self.log(f"已点击签到按钮（第 {attempt} 次），等待验证码弹窗")
             try:
-                await browser.wait_selector(self.SEL_POPUP_IMG, timeout=6000)
+                await browser.wait_selector(self.SEL_POPUP_IMG, timeout=8000)
                 popup_ok = True
                 break
             except PWTimeout:
                 self.log("验证码弹窗未出现")
-                await browser.wait_timeout(1000)
+                hint = await self.popup_hint()
+                if hint:
+                    self.log(f"弹窗提示: {hint}")
+                    if "获取验证码失败" in hint:
+                        return False, "站点返回「获取验证码失败」，本次签到未进行（可稍后重试）"
+                if await self.showup_text_signed():
+                    return True, "今日已签到（无需重复）"
+                await browser.wait_timeout(1200)
 
         if not popup_ok:
+            await self.dump_showup_diag()
             body = await self.page_text()
             if "已签到" in body or "已经签到" in body:
                 return True, "今日已签到（无需重复）"
             return False, "点击签到后验证码弹窗未出现（可能今日已签到或页面结构变化）"
 
+        # 等验证码图片真正加载出来（naturalWidth>0），否则 AI 拿到的可能是空白图
+        try:
+            await browser.page.wait_for_function(
+                "() => { const i = document.querySelector('#showupimg');"
+                " return !!(i && i.complete && i.naturalWidth > 0); }",
+                timeout=10000,
+            )
+        except Exception:
+            self.logger.warning("验证码图片加载确认超时，继续尝试识别")
         await browser.wait_timeout(600)  # 等验证码图片渲染完成
 
         # 识别弹窗验证码
@@ -217,15 +239,142 @@ class PTKongTask(BaseTask):
             return False, f"验证码识别失败: {e}"
 
         # 提交
-        await browser.click(self.SEL_POPUP_BTN)
+        if not await self.submit_popup():
+            return False, "无法点击「提交」按钮（验证码弹窗结构变化或被浮层遮挡）"
         self.log("已提交签到验证码，等待结果")
 
         status = await self.wait_checkin_result()
         return self._interpret_result(status)
 
     # ---------- 子步骤 ----------
+    # ---------- 签到入口（#showup）辅助 ----------
+    async def showup_text_signed(self) -> bool:
+        """签到入口的文字是否已被站点改成「已签到(Showed Up)」"""
+        try:
+            txt = await self.ctx.browser.evaluate(
+                "() => { const el = document.querySelector('#showup');"
+                " return el ? (el.innerText || el.textContent || '') : ''; }"
+            ) or ""
+        except Exception:
+            return False
+        low = txt.lower()
+        return "已签到" in txt or "已经签到" in txt or "showed up" in low
+
+    async def wait_showup_ready(self, timeout_s: int = 15) -> bool:
+        """等 common.js 给 #showup 绑定 click 处理函数。
+
+        只等 `typeof jQuery !== 'undefined'` 是不够的：jQuery 加载完成时
+        `jQuery(function(){...})` 里的绑定还没执行，此时点击没有任何反应。
+        """
+        js = (
+            "() => {"
+            "  try {"
+            "    if (typeof jQuery === 'undefined') return false;"
+            "    if (typeof layer === 'undefined') return false;"   # 弹窗由 layer.open 构建
+            "    const el = document.querySelector('#showup');"
+            "    if (!el) return false;"
+            "    const ev = jQuery._data ? jQuery._data(el, 'events') : null;"
+            "    if (!ev) return false;"
+            "    return !!(ev.click && ev.click.length);"
+            "  } catch (e) { return false; }"
+            "}"
+        )
+        try:
+            await self.ctx.browser.page.wait_for_function(js, timeout=timeout_s * 1000)
+            return True
+        except Exception:
+            # 读不到事件表（jQuery 版本差异）不等于没绑定，只当作「无法确认」
+            try:
+                await self.ctx.browser.page.wait_for_function(
+                    "() => typeof jQuery !== 'undefined'", timeout=3000
+                )
+            except Exception:
+                pass
+            return False
+
+    async def click_showup(self, attempt: int = 1) -> bool:
+        """分策略点击签到（每次重试用一种更强的兜底）：
+
+        1 拟人点击（正常路径）  2 强制点击（绕过遮挡/可点击性检查）
+        3 DOM click()（绕过浮层拦截，直接触发已绑定的处理器）
+        站点把入口做成无 href 的 <a>，被浮层遮挡或事件尚未绑定时，
+        Playwright 的 actionability 检查会一直重试到超时，这里逐级降级避免整任务失败。
+        """
+        browser = self.ctx.browser
+        try:
+            if attempt <= 1:
+                await browser.human_click(self.SEL_SHOWUP)
+            elif attempt == 2:
+                locator = browser.page.locator(self.SEL_SHOWUP).first
+                try:
+                    await locator.scroll_into_view_if_needed(timeout=5000)
+                except Exception:
+                    pass
+                await locator.click(force=True, timeout=5000)
+            else:
+                await browser.evaluate(
+                    "() => { const el = document.querySelector('#showup'); if (el) el.click(); }"
+                )
+            return True
+        except Exception as e:
+            self.logger.warning(f"第 {attempt} 次点击签到未成功（{e}），下次换更强的方式")
+            return False
+
+    async def submit_popup(self) -> bool:
+        """点「Let's Go」提交验证码；常规点击被遮挡时降级为 DOM click"""
+        browser = self.ctx.browser
+        try:
+            await browser.click(self.SEL_POPUP_BTN)
+            return True
+        except Exception as e:
+            self.logger.warning(f"提交按钮常规点击失败（{e}），改用 DOM 点击")
+        try:
+            await browser.evaluate(
+                "() => { const el = document.querySelector('%s'); if (el) el.click(); }"
+                % self.SEL_POPUP_BTN
+            )
+            return True
+        except Exception as e:
+            self.logger.warning(f"DOM 点击提交按钮也失败: {e}")
+            return False
+
+    async def popup_hint(self) -> str:
+        """读取当前所有 layer 弹层的文字（用于判断「请稍后」「获取验证码失败」等）"""
+        try:
+            txt = await self.ctx.browser.evaluate(
+                "() => Array.from(document.querySelectorAll('.layui-layer-content'))"
+                ".map(e => (e.innerText || '').trim()).filter(Boolean).join(' | ')"
+            )
+        except Exception:
+            return ""
+        return (txt or "").strip()
+
+    async def dump_showup_diag(self) -> None:
+        """弹窗没出现时记录现场（写日志 + 截图），便于下次定位"""
+        try:
+            info = await self.ctx.browser.evaluate(
+                "() => ({"
+                "  url: location.href,"
+                "  hasShowup: !!document.querySelector('#showup'),"
+                "  showupText: ((document.querySelector('#showup') || {}).innerText || '').trim(),"
+                "  jQuery: typeof jQuery !== 'undefined',"
+                "  layer: typeof layer !== 'undefined',"
+                "  layerCount: document.querySelectorAll('.layui-layer').length,"
+                "  imgIds: Array.from(document.querySelectorAll('img[id^=showup]')).map(e => e.id)"
+                "})"
+            )
+            self.log(f"签到弹窗诊断: {info}")
+        except Exception as e:
+            self.logger.warning(f"签到弹窗诊断取值失败: {e}")
+        try:
+            path = await self.ctx.browser.save_screenshot(name=f"{self.id}_showup_diag")
+            self.log(f"已保存签到现场截图: {path}")
+        except Exception:
+            pass
+
     async def open_site(self) -> None:
         await self.ctx.browser.goto(self.cfg.url)
+        await self.note_site_origin()
         if self.cfg.has_cf:
             await self.handle_challenge_if_any()
 
@@ -289,7 +438,7 @@ class PTKongTask(BaseTask):
                         continue  # 仍无表单，下一轮再试
 
                 self.log(f"第 {attempt}/{remaining} 次登录尝试（累计失败 {self.login_used()}/{limit}）")
-                await browser.wait_selector(self.SEL_USERNAME, timeout=8000)
+                await browser.wait_selector(self.SEL_USERNAME)
                 await browser.fill(self.SEL_USERNAME, username)
                 await browser.fill(self.SEL_PASSWORD, password)
 
@@ -380,6 +529,9 @@ class PTKongTask(BaseTask):
                 for kw in self.KW_FAIL:
                     if kw in layer_text:
                         return "fail"
+            # 页面自己的成功标志最可靠：showup.php 成功后入口文字变成「已签到(Showed Up)」
+            if await self.showup_text_signed():
+                return "success"
             # 弹窗消失：等页面刷新后再确认，避免把"验证码错误导致弹窗关闭"误判为成功
             try:
                 if not await browser.page.query_selector(self.SEL_POPUP_BTN):

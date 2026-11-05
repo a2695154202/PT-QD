@@ -1,6 +1,7 @@
-"""HDDolby（site-b.example）签到任务。
+"""HDDolby 签到任务。
 
-站点为 NexusPHP，登录页 https://site-b.example/index.php
+站点为 NexusPHP，登录页 https://site-b.example/login.php（早期域名 site-b.example
+已弃用，只在 task.url 配置过旧域名、站点本身能 301 过去时才会用到）：
 - <form action="takelogin.php">，字段：username / password / 2fa / imagestring / imagehash
 - 注意：2FA 字段名是 "2fa"（不是 oneCode），且站点有 Cloudflare 人机验证
 - 登录后 info_block 才有 logout.php / userdetails.php / attendance.php
@@ -8,6 +9,7 @@
 
 签到页结构随站点插件不同而变化，因此签到按钮支持在任务配置里用
 options.checkin_btn / options.checkin_url 覆盖；未配置时自动探测。
+签到页地址只写路径，域名统一由 task.url 决定（站点换域名时不用改代码）。
 """
 from __future__ import annotations
 
@@ -20,7 +22,7 @@ class HDDolbyTask(NexusPHPTask):
     id = "hddolby"
     name = "HDDolby"
     description = "HDDolby(site-b.example) 每日签到：NexusPHP，支持 CF 人机验证 / 2FA / AI 验证码"
-    site = "https://site-b.example/index.php"
+    site = "https://site-b.example/"
 
     # 登录页（2FA 字段名为 2fa）
     SEL_ONECODE = "form[action='takelogin.php'] input[name='2fa']"
@@ -30,8 +32,8 @@ class HDDolbyTask(NexusPHPTask):
         "a[href*='userdetails.php']",
         "a[href*='attendance.php']",
     )
-    # 签到页
-    CHECKIN_URL = "https://site-b.example/index.php"
+    # 签到页（只写路径，域名跟随 task.url）
+    CHECKIN_URL = "/attendance.php"
     CHECKIN_BTN_CANDIDATES = (
         "input[type='submit'][value*='签到']",
         "input[type='button'][value*='签到']",

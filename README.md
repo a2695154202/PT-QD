@@ -11,8 +11,9 @@
 | 2FA（TOTP） | 导入谷歌身份验证器二维码（`otpauth://` 与 `otpauth-migration://` 导出格式均支持）；**任务级勾选是否有 2FA，并可指定绑定凭证库中的哪个验证器** |
 | AI 能力（用户配置） | OpenAI 兼容接口；识别登录/签到页的图形验证码（CF 人机验证不再调用 AI） |
 | CookieCloud | 输入服务器/UUID/密钥，本地 AES 解密同步 cookie；工作模式：**覆盖到浏览器 / 暂停同步**，默认同步全部站点；**在打开站点之前就把 cookie 注入浏览器** |
-| 代理 | 全局设置代理地址（http/socks5 + 可选账号密码）；任务配置里勾选「本任务走代理」才使用，未勾选的任务强制直连 |
-| 签到任务 | 任务基类 + 注册表 + YAML 配置；任务可单独勾选是否有 2FA / CF 验证 / 走代理。内置 **PT-空（site-a.example）**、**HDDolby（site-b.example）**、**TTG 听听歌（site-c.example）**、**馒头 M-Team（site-d.example）**、**人人 Audiences（site-e.example）**、**Akile（site-f.example，控制台「每日签到」）**、**憨憨 HHCLUB（site-g.example，attendance.php 停留即签到）** |
+| 代理 | 全局设置代理地址（http/socks5 + 可选账号密码）；任务配置里勾选「本任务走代理」才使用，未勾选的任务强制直连（**本程序从不使用 Windows 系统代理**） |
+| Telegram 通知 | 跑完一遍任务后把签到汇总推到手机：成功/失败数量 + 每个任务一行结论；默认**走代理**（`use_proxy: true`），可设「只在失败时推送」 |
+| 签到任务 | 任务基类 + 注册表 + YAML 配置；任务可单独勾选是否有 2FA / CF 验证 / 走代理。内置 **PT-空（site-a.example）**、**HDDolby（site-b.example）**、**TTG 听听歌（site-c.example）**、**馒头 M-Team（site-d.example）**、**Akile（site-f.example，控制台「每日签到」）**、**憨憨 HHCLUB（site-g.example，attendance.php 停留即签到）** |
 | 任务队列 | 严格串行：一个任务跑完再跑下一个；队列全部结束后才关闭浏览器（任务之间浏览器保持运行） |
 | 定时运行 | 全局设置里设「每天 HH:MM」自动签到；**在定时页里单独勾选要跑哪些任务**（与主界面勾选无关）；可勾选**跳过当天已签到的任务**、**错过时间点是否补跑**；每天只自动跑一次，状态栏显示下次运行时间 + 任务数（程序需保持打开） |
 | 运行日志 | 每次运行单独写入 `data/logs/run_日期_时间.log`；运行结束自动关闭浏览器 |
@@ -46,7 +47,7 @@ python main.py run pt_kong  # 命令行运行任务
 ## 图形界面
 
 - **任务列表**：每行一个任务，勾选框决定本次运行哪些；点「配置」打开任务配置对话框
-  - 任务名后括号里显示**今天**是否已签到：`任务名称(已签到)` / `人人(未签到)`
+  - 任务名后括号里显示**今天**是否已签到：`任务名称(已签到)` / `HDDolby(未签到)`
     —— 昨天的签到结果今天会自动变回「未签到」；记录行用「今天: …」/「上次: …」区分
   - **已签到的任务默认不勾选**（打开程序 / 刷新任务都一样），避免白跑一遍
   - 结果记录在 `data/task_state.json`，每次运行后自动更新；跨天时界面自动刷新
@@ -91,8 +92,47 @@ proxy:
   password: ""                        # 可选
 ```
 
-代理生效规则：只有任务配置里勾选了「本任务走代理」的任务才走该代理；未勾选的任务以
-`--no-proxy-server` 启动强制直连（不走此代理也不走系统代理）；全局代理未启用时所有任务跟随系统设置。
+`browser` 段（动作节奏与超时，慢机器/被人机验证卡住时主要调这里）：
+
+```yaml
+browser:
+  slow_mo: 50               # Playwright 自带的每步间隔(ms)
+  action_delay_ms: 150      # 【新增】每个动作前的拟人小延时(ms)，带 0.6~1.5 倍随机抖动；0=关闭
+  default_timeout: 20000    # 【默认调大】等元素/点击的单步超时(ms)
+  nav_timeout: 45000        # 【新增】打开页面的超时(ms)；CF 挑战页常迟迟不触发 domcontentloaded
+```
+
+- **动作延时**：点击、填表、打开页面之前都会先停顿一小会儿再操作（`action_delay_ms`），
+  避免连点过快被站点判定为机器人；数值越大越慢，0 表示关闭
+- **导航超时不再判失败**：`goto` 超过 `nav_timeout` 但页面地址已经是 `http(s)`（说明其实已经打开了），
+  只记一条 WARNING 就继续后续判定 —— 这正是之前「页面明明打开了却报 Timeout 15000ms」的原因
+- 慢机器上仍报超时，把 `default_timeout` / `nav_timeout` 再调大即可，不用改代码
+
+代理生效规则：**本程序从不使用 Windows 系统代理**。任务勾选了「本任务走代理」且「全局设置 → 代理」
+里填了地址，才走你配置的那个代理；没配置代理、或本任务没勾选，一律以 `--no-proxy-server` 启动强制直连。
+AI 识别与 CookieCloud 请求同样遵守这条规则（`trust_env=False`，不吃系统代理与 `HTTP_PROXY` 环境变量）。
+
+> 为什么要这样：如果电脑上开着系统代理（VPN、加速器、公司网络），Chromium 和 `requests`
+> 默认都会走它，表现就是「浏览器里页面明明能打开，任务却一直报超时 / 点不动」。
+
+### Telegram 通知（跑完自动汇报）
+
+一遍任务跑完后，把汇总结果推到 Telegram：成功/失败数量 + 每个任务一行结论。
+
+```yaml
+telegram:
+  enabled: true
+  bot_token: "123456789:AA..."   # @BotFather 建 bot 后拿到的 token
+  chat_id: "123456789"           # 个人数字 id；群组填负数（-100...）
+  use_proxy: true                # 默认走代理：api.telegram.org 国内直连基本不通
+  only_on_failure: false         # true = 只有出现失败才推送
+```
+
+配置步骤：找 **@BotFather** 发 `/newbot` 拿到 token → **先给 bot 发一条消息**（否则 bot 不能主动找你）
+→ 找 **@userinfobot** 拿到自己的数字 id → 填进「全局设置 → 通知」→ 点「发送测试消息」验证。
+`use_proxy: true` 时复用「全局设置 → 代理」里的地址；没配代理会直连并在日志里说明。
+
+命令行也能单独测：`签到助手.exe test-telegram`。推送失败只写日志，不影响签到结果。
 
 `config/tasks/*.yaml` 任务设置（PT-空 示例）：
 
@@ -154,7 +194,6 @@ options:
 │   ├── hddolby.py           # HDDolby 任务实现（继承 NexusPHP 基类）
 │   ├── ttg.py               # TTG 听听歌任务实现（多语言表单 + JS 签到）
 │   ├── mteam.py             # 馒头 M-Team 任务实现（React 单页应用 + 2FA + 保活）
-│   ├── audiences.py         # 人人 Audiences 任务（默认桌面模式：CookieCloud→正常浏览器签到，无效才调试浏览器登录）
 │   ├── akile.py             # Akile 任务（Vue 单页应用：登录 + 验证器 2FA + 控制台「每日签到」）
 │   └── hhan.py              # 憨憨 HHCLUB 任务（NexusPHP：图形验证码 + two_step_code，attendance.php 停留即签到）
 ├── ui/gui.py                # Tkinter 界面（主窗口 + 任务配置 + 全局设置）
@@ -199,7 +238,7 @@ python main.py gui                     # 启动图形界面
 
 ## HDDolby 签到流程
 
-站点 `https://site-b.example/index.php`，NexusPHP，登录需 2FA，且有 Cloudflare 人机验证。
+站点 `https://site-b.example/`，NexusPHP，登录需 2FA，且有 Cloudflare 人机验证。
 
 1. 打开前注入 CookieCloud cookie → 打开 `index.php`
 2. 遇到 Cloudflare 挑战时（任务已勾选「有 CF 验证」）进入**实时处理**模式：每秒探测一次页面，
@@ -246,89 +285,6 @@ python main.py gui                     # 启动图形界面
    - 2FA 密钥留空时按站点域名自动匹配凭证库（`M-Team - TP` 那个账号）
 4. 登录完成后在首页保持 `keep_seconds` 秒（默认 10 秒），保持期间若跳回登录页则判定失败
 5. 该站是 SPA，判定时会先等渲染，避免把加载中的空白页当成登录成功
-
-## 人人（Audiences）签到流程
-
-站点 `https://site-e.example/index.php`，NexusPHP（BlasphemyOrange 皮肤），有 Cloudflare 保护。
-
-**该任务默认走「桌面模式」**（`options.desktop_mode: true`），与其它任务不同：
-
-### 桌面模式（默认）：CookieCloud → 正常浏览器签到；无效才登录（pydoll 优先）
-
-Cloudflare 能识别 Playwright/CDP 驱动的自动化浏览器，对人机验证卡得特别死；
-但登录页只是普通图形验证码，交给自动化反而又快又稳。所以人人任务拆成两段：
-
-```
-CookieCloud 取 cookie
-   └─ 写入「正常浏览器」的 profile（同一 profile → cookie 天然共享）
-        └─ 带 cookie 请求签到页，判定是否仍有效
-             ├─ 有效 → 打开正常浏览器（无调试端口，最大化 + 置顶）→ AI 识图过 Turnstile 并签到
-             └─ 无效 → 用「开了调试端口的 Edge」打开登录页自动登录（识别验证码 / 2FA）
-                        → cookie 落盘到同一 profile → 再打开正常浏览器签到
-```
-
-- **两个浏览器共用一个独立 profile**（`data/desktop_profile`），所以 cookie 不需要"跨进程注入"：
-  调试浏览器关闭时 cookie 落盘，正常浏览器启动就是登录状态
-- **正常浏览器不带 `--remote-debugging-port`**，CF 看到的是普通浏览器；窗口 `--start-maximized` 并置顶
-- **签到页的 CF 由 AI 在正常浏览器里处理**（没有调试端口，只能靠识图操作）：
-  提示词明确要求「如果拦截时需要点击或拖动才能过验证，请你进行相关操作」，
-  AI 会点「请验证您是真人」复选框或按住滑块拖到缺口
-- **登录优先用 pydoll**（`core/pydoll_login.py`）：直连 CDP、不设 `navigator.webdriver`，
-  实测打开本站登录页**根本不触发 CF**，可自动填账号密码 + AI 识别验证码完成登录；
-  登录后把 cookie 写回同一个 profile，正常浏览器直接就是登录状态
-- pydoll 失败 → 退回 Playwright 调试浏览器登录 → 仍失败则「正常浏览器里由 AI 识别验证码登录 + 签到」
-- 判定 cookie 是否有效用「带 cookie 请求签到页，看是否被踢到登录页」，不用开浏览器，几秒出结果
-- 会话 cookie（`expires=-1`）会自动补 30 天有效期，否则 Chromium 不会写进 profile（关键细节）
-
-**实现**：
-- `core/browser_bridge.py`：profile 桥接（写/读 cookie、启动/关闭正常浏览器、最大化 + 置顶、
-  清理残留进程）；`core/desktop.py` 补了窗口最大化/置顶 API
-- `core/desktop_agent.py`：识图点击 Agent（ReAct 循环，带历史避免重复无效动作）
-- 坐标约定：截图是屏幕物理像素，AI 返回的 x/y 直接就是 `SetCursorPos` 坐标（一一对应）
-
-**配置**（`config/tasks/audiences.yaml`）：
-```yaml
-options:
-  desktop_mode: true
-  desktop_profile: "data/desktop_profile"   # 调试/正常浏览器共用的 profile
-  desktop_debug_port: 9223                  # 调试浏览器端口（别和全局 9222 冲突）
-  desktop_window_title: "Audiences"         # 正常浏览器窗口标题关键字（定位窗口用）
-  desktop_startup_wait: 6                   # 打开后等页面渲染的秒数
-  desktop_max_steps: 20                     # 识图点击最多多少步
-  pydoll_login: true                        # 优先用 pydoll 登录（不触发 CF）
-  pydoll_headed: true                       # pydoll 是否显示窗口（CF 托管挑战需要 True）
-  normal_maximized: true                    # 正常浏览器最大化
-  normal_topmost: true                      # 正常浏览器置顶
-  keep_normal_open: false                   # 签到后是否保留浏览器窗口
-```
-
-### 自动化模式（`desktop_mode: false` 时）
-
-1. 打开前注入 CookieCloud cookie → 打开 `index.php`
-2. 遇到 Cloudflare 挑战时（任务已勾选「有 CF 验证」）进入实时处理：每秒探测，出现可点击/可滑动控件立刻处理
-3. 登录页：`form[action='takelogin.php']`，字段 用户名 / 密码 / **两步验证码（字段名 `scode`）** / 图形验证码
-   - 该站点账号未开启两步验证时 `scode` 留空即可；若以后开启，勾选「有 2FA」并绑定验证器即可自动填写
-   - 图形验证码（`image.php?action=regimage`）交给 AI 识别
-4. 登录态判定：`logout.php` / `userdetails.php` / `attendance.php`（userbar 的签到入口）
-5. 签到：进入 `attendance.php`，该页是 **Cloudflare Turnstile 人机验证**（没有提交按钮）：
-   ```html
-   <form id="attendance-form" action="attendance.php" method="post">
-     <input type="hidden" name="cf-token" id="cf-token" value="">
-     <div class="cf-turnstile" data-sitekey="..." data-callback="cfCallback"></div>
-   </form>
-   ```
-   `cfCallback` 在验证通过后直接 `attendance-form.submit()`，因此处理方式是**每秒轮询 + 加载即处理**：
-   - 每 **1 秒**检测一次 Turnstile 控件是否加载完成（iframe 已渲染且有可见尺寸）
-   - 一旦加载完成**立即处理**，优先级为：
-     1. 在 CF 跨域 iframe 内直接找到复选框元素并点击（**不消耗 AI**）
-     2. 找不到元素时按"复选框在控件左侧"的几何位置点击
-     3. 以上都失败才把控件区域截图交给 AI 定位并立即点击
-   - AI 判断"无需点击"（已自动通过 / 隐形验证）时继续每秒观察，不重复瞎点
-   - 最多尝试 2 次点击（间隔 ≥3 秒），总时长受 `turnstile_timeout` 限制（默认 40 秒）
-   - 验证通过后表单自动提交，按结果页文案判定（`签到成功` / `今日已签到` / `明天再来`）
-6. **判定注意**：签到页规则区常驻"首次签到获得 20 粒爆米花""连续签到加成"等文案，
-   因此成功判定不使用「获得 / 爆米花 / 连续签到」，只认结果页专有文案，避免误报
-7. 连续 20 次登录失败会封 IP，`max_login_retry` 保持 2 以内；`turnstile_timeout` 默认 40 秒
 
 ## 人机验证（Cloudflare）实时处理
 

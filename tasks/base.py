@@ -12,8 +12,9 @@ import pkgutil
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional
+from urllib.parse import urljoin, urlparse, urlunparse
 
-from core.config import AppConfig, TaskConfig
+from core.config import AppConfig, TaskConfig, _as_bool
 from core.events import EventBus, Events
 from core.logger import get_logger
 from core.state import (
@@ -44,7 +45,6 @@ KNOWN_TASKS = (
     "tasks.hddolby",
     "tasks.ttg",
     "tasks.mteam",
-    "tasks.audiences",
     "tasks.akile",
     "tasks.hhan",
 )
@@ -69,6 +69,23 @@ def load_registry() -> dict[str, type["BaseTask"]]:
     except Exception:
         pass  # frozen 环境无物理目录，已由 KNOWN_TASKS 覆盖
     return _REGISTRY
+
+
+def known_task_ids() -> set[str]:
+    """当前版本真正有实现的任务 id（用来过滤已下线任务遗留的配置文件）"""
+    return set(load_registry().keys())
+
+
+def split_known_configs(configs):
+    """把配置分成 (本版本支持的, 已下线的)。
+
+    已删除的任务（如旧版的人人/Audiences）如果还留着 config/tasks/*.yaml，
+    不应该再出现在界面和任务列表里 —— 否则用户会看到一个点不动的幽灵任务。
+    """
+    ids = known_task_ids()
+    known = [c for c in configs if c.id in ids]
+    stale = [c for c in configs if c.id not in ids]
+    return known, stale
 
 
 @dataclass
@@ -107,12 +124,19 @@ class BaseTask(ABC):
     description: str = ""
     site: str = ""
 
+    # 站点地址（子类可覆盖；运行时一律经 checkin_page_url / login_page_url 解析，
+    # 站点换域名时只要改任务配置里的 task.url，这些内置地址会自动跟随）
+    CHECKIN_URL = ""
+    LOGIN_URL = ""
+
     def __init__(self, cfg: TaskConfig, ctx: TaskContext):
         self.cfg = cfg
         self.ctx = ctx
         self.logger = get_logger()
         self.events = ctx.events or EventBus()
         self.result_shots: list[str] = []
+        self._url_rebased: set[tuple[str, str]] = set()   # 已记过日志的地址重挂
+        self._nav_origin: str = ""                        # 本任务自己导航落地的站点域名
 
     # ---------- 模板方法 ----------
     async def run(self) -> TaskResult:
@@ -172,6 +196,121 @@ class BaseTask(ABC):
             except Exception:
                 domain = ""
         return domain
+
+    # ---------- 站点地址（域名变更自适应） ----------
+    # 背景：各任务里写过内置的签到页/登录页地址（如 https://site-b.example/attendance.php）。
+    # 站点换域名后，用户只把 task.url 改成新域名，内置地址里的旧域名仍会被访问 → 签到页打不开。
+    # 因此所有 URL 统一走下面几个方法：只取内置地址的「路径/参数」，域名一律换成当前站点的。
+    def opt_str(self, key: str, default: str = "") -> str:
+        """读取 options 里的字符串项（非字符串也能安全转成 str）"""
+        val = self.cfg.options.get(key)
+        if val is None:
+            return default
+        return str(val).strip()
+
+    def site_origin(self) -> str:
+        """配置里的站点根地址 scheme://host（task.url 优先，其次类属性 site）"""
+        for raw in (getattr(self.cfg, "url", "") or "", getattr(self, "site", "") or ""):
+            p = urlparse(str(raw).strip())
+            if p.scheme in ("http", "https") and p.netloc:
+                return f"{p.scheme}://{p.netloc}"
+        return ""
+
+    async def page_origin(self) -> str:
+        """浏览器当前所在页面的 scheme://host（没有页面时返回空串）"""
+        try:
+            current = await self.ctx.browser.url()
+        except Exception:
+            return ""
+        p = urlparse(str(current or "").strip())
+        if p.scheme in ("http", "https") and p.netloc:
+            return f"{p.scheme}://{p.netloc}"
+        return ""
+
+    async def note_site_origin(self) -> str:
+        """**本任务自己打开页面之后**调用：记下这次导航真实落地的站点域名。
+
+        为什么不能直接读「浏览器当前页面」：任务队列串行复用同一个浏览器，
+        第二个任务开始时页面还停在上一个任务站点的地址上。若拿它当本站域名，
+        第二个任务的签到页就会被拼到上一个任务的网站上（谁先跑，后一个就跟谁）。
+        因此只在任务自己 goto 过之后再采样，且只认第一次（登录跳转可能换主机，
+        之后再采样会来回抖）。
+        """
+        if self._nav_origin:
+            return self._nav_origin
+        conf = self.site_origin()
+        live = await self.page_origin()
+        if not live:
+            self._nav_origin = conf
+            return self._nav_origin
+        h_conf = (urlparse(conf).hostname or "").lower() if conf else ""
+        h_live = (urlparse(live).hostname or "").lower()
+        # www 有无、大小写这类小差异按配置走
+        if not h_conf or h_live == h_conf or h_live.endswith("." + h_conf) \
+                or h_conf.endswith("." + h_live):
+            self._nav_origin = conf or live
+        else:
+            # 站点自己 301 到新域名：按落地域名走（配置里的 url 可以晚点再改）
+            self.log(f"站点已跳转到新域名 {h_live}（配置里是 {h_conf}），后续按新域名访问")
+            self._nav_origin = live
+        return self._nav_origin
+
+    async def site_base_origin(self) -> str:
+        """当前站点根地址：优先用本任务自己导航落地的域名，其次配置里的 task.url
+
+        **不读**浏览器当前页面，避免读到上一个任务遗留的站点（共享浏览器场景）。
+        """
+        return self._nav_origin or self.site_origin()
+
+    def rebase_url(self, url: str, origin: str = "") -> str:
+        """把地址重挂到当前站点域名上（保留路径/参数，只换协议+域名）。
+
+        - 相对地址（"/attendance.php"）→ 拼到站点根地址后面
+        - 绝对地址但域名与站点不同 → 只取路径/参数/锚点，域名换成站点的
+        - 域名相同 → 原样返回
+        - options.keep_url_host: true 时完全不重挂（站点确实另用一个域名时用）
+        """
+        raw = (url or "").strip()
+        if not raw:
+            return ""
+        if _as_bool(self.cfg.options.get("keep_url_host"), False):
+            return raw
+        base = (origin or self.site_origin()).rstrip("/")
+        p = urlparse(raw)
+        if not p.netloc:                                  # 相对地址
+            if not base:
+                return raw
+            return urljoin(base + "/", raw)
+        b = urlparse(base)
+        if not b.netloc or b.netloc.lower() == p.netloc.lower():
+            return raw
+        return urlunparse((b.scheme or p.scheme, b.netloc, p.path or "/",
+                           p.params, p.query, p.fragment))
+
+    async def resolve_site_url(self, url: str, what: str = "页面") -> str:
+        """按当前站点域名解析地址；发生重挂时打一行日志（同一地址只打一次）"""
+        raw = (url or "").strip()
+        if not raw:
+            return ""
+        resolved = self.rebase_url(raw, await self.site_base_origin())
+        if resolved != raw:
+            key = (raw, resolved)
+            if key not in self._url_rebased:
+                self._url_rebased.add(key)
+                self.log(f"{what}地址已按当前站点域名重挂：{raw} → {resolved}")
+        return resolved
+
+    async def checkin_page_url(self) -> str:
+        """签到页地址：options.checkin_url → 内置 CHECKIN_URL → 站点首页（域名随之重挂）"""
+        raw = (self.opt_str("checkin_url") or self.CHECKIN_URL
+               or getattr(self.cfg, "url", "") or "").strip()
+        return await self.resolve_site_url(raw, "签到页")
+
+    async def login_page_url(self) -> str:
+        """登录页地址：内置 LOGIN_URL → 站点首页（域名随之重挂）"""
+        raw = (self.opt_str("login_url") or self.LOGIN_URL
+               or getattr(self.cfg, "url", "") or "").strip()
+        return await self.resolve_site_url(raw, "登录页")
 
     async def prepare_cookies(self) -> bool:
         """**打开站点之前**把 CookieCloud 的 cookie 注入浏览器上下文。
