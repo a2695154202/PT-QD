@@ -18,6 +18,8 @@ from tkinter import filedialog, messagebox, ttk
 
 from core.config import AppConfig, load_task_configs
 from core import net
+from core.telegram import _esc
+from core.telegram_bot import TelegramBot
 from core.logger import get_logger
 from core.scheduler import (describe, normalize_hhmm, normalize_tasks,
                             pick_scheduled, should_run)
@@ -664,9 +666,91 @@ class SigninApp:
         self.checks: dict[str, tk.BooleanVar] = {}
         self._running = False
         self._day = today_str()
+        self._tg_bot = None
         self._build()
         self.root.after(30000, self._watch_day)
         self.root.after(5000, self._schedule_tick)
+        self.root.after(1200, self._start_telegram_bot)     # 等界面出来再连 TG
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    # ---------- Telegram 简单交互 ----------
+    def _start_telegram_bot(self) -> None:
+        """配置了就启动后台轮询：/status /run /retry /menu 与内联按钮都靠它"""
+        if self._tg_bot is not None and self._tg_bot.running:
+            return
+        cfg = AppConfig.load().telegram
+        if not cfg.ready:
+            return
+        handlers = {"status": self._tg_status_text,
+                    "run": self._tg_run_all,
+                    "retry": self._tg_retry}
+        try:
+            self._tg_bot = TelegramBot(cfg, handlers)
+            self._tg_bot.start()
+        except Exception as e:
+            LOGGER.warning(f"启动 Telegram 交互失败: {e}")
+
+    def _stop_telegram_bot(self) -> None:
+        if self._tg_bot is not None:
+            try:
+                self._tg_bot.stop()
+            except Exception:
+                pass
+            self._tg_bot = None
+
+    def _restart_telegram_bot(self) -> None:
+        self._stop_telegram_bot()
+        self.root.after(300, self._start_telegram_bot)
+
+    def _tg_status_text(self) -> str:
+        configs = split_known_configs(load_task_configs())[0]
+        if not configs:
+            return "没有任务配置。"
+        st = load_state()
+        lines = [f"<b>今日签到状态</b> · {today_str()}"]
+        done = 0
+        for c in configs:
+            ok = is_signed(c.id)
+            done += 1 if ok else 0
+            info = st.get(c.id, {})
+            msg = _short_msg(info.get("message", "")) if info.get("time") else ""
+            mark = "✅" if ok else "⚪️"
+            lines.append(f"{mark} <b>{_esc(c.name)}</b>  {_esc(msg)}".rstrip())
+        lines.append("")
+        lines.append(f"已签到 {done}/{len(configs)}")
+        return "\n".join(lines)
+
+    def _tg_run_all(self) -> str:
+        configs = split_known_configs(load_task_configs())[0]
+        ids = [c.id for c in configs if c.enabled]
+        if not ids:
+            return "没有启用的任务。"
+        if self._running:
+            return "已经有一个任务队列在跑，等它跑完再来。"
+        self.root.after(0, lambda: self._run_async(ids, silent=True))
+        return f"已开始运行 {len(ids)} 个任务，跑完会把汇总推回来。"
+
+    def _tg_retry(self, ids=None) -> str:
+        configs = split_known_configs(load_task_configs())[0]
+        by_id = {c.id: c.name for c in configs}
+        if ids:
+            target = [t for t in ids if t in by_id]
+        else:
+            target = [c.id for c in configs if c.enabled and not is_signed(c.id)]
+        if not target:
+            return "没有需要重试的任务：今天都已经签到了。"
+        if self._running:
+            return "已经有一个任务队列在跑，等它跑完再来。"
+        self.root.after(0, lambda: self._run_async(target, silent=True))
+        names = "、".join(by_id.get(t, t) for t in target)
+        return f"已开始重试 {len(target)} 个任务：{names}"
+
+    def _on_close(self) -> None:
+        self._stop_telegram_bot()
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
 
     def _watch_day(self):
         """跨天自动刷新：界面开着过夜也能把「已签到」变成「未签到」"""
@@ -898,6 +982,7 @@ class SigninApp:
     def _after_settings_saved(self):
         self.refresh_tasks()
         self._update_schedule_label()
+        self._restart_telegram_bot()     # token/开关可能改了
 
     # ---------- 运行 ----------
     def run_selected(self):

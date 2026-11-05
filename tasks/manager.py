@@ -14,7 +14,7 @@ from core.cookiecloud import CookieCloudClient
 from core.events import EventBus
 from core.logger import current_run_log, get_logger, setup_logging, start_run_log, stop_run_log
 from core.state import record_result
-from core.telegram import TelegramNotifier, summarize
+from core.telegram import TelegramNotifier
 from .base import (BaseTask, TaskContext, TaskResult, load_registry,
                    split_known_configs)
 
@@ -212,11 +212,12 @@ class TaskManager:
             return
         names = {c.id: c.name for c in self.discover()}
         rows = [(names.get(r.task_id, r.task_id), r.success, r.message) for r in results]
+        failed_ids = [r.task_id for r in results if not r.success]
         try:
-            text = summarize(rows)
             notifier = TelegramNotifier(cfg)
-            await asyncio.to_thread(notifier.send, text)
-            self.logger.info(f"签到汇总已推送到 Telegram（{len(rows)} 个任务）")
+            await asyncio.to_thread(notifier.send_summary, rows, failed_ids)
+            self.logger.info(f"签到汇总已推送到 Telegram（{len(rows)} 个任务，"
+                             f"失败 {len(failed_ids)} 个）")
         except Exception as e:
             self.logger.warning(f"Telegram 汇总推送失败（不影响签到结果）: {e}")
 

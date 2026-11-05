@@ -53,6 +53,33 @@ def summarize(rows: Sequence[tuple[str, bool, str]],
     return text
 
 
+def retry_keyboard(task_ids: Optional[Sequence[str]] = None) -> dict:
+    """失败通知上的按钮：重试失败项 + 查看今日状态。
+
+    callback_data 里能塞下失败任务 id 就带上（≤48 字符），
+    这样即使程序重启过，也能精确重试那几个任务。
+    """
+    data = "retry"
+    if task_ids:
+        joined = ",".join(task_ids)
+        if len(joined) <= 48:
+            data = f"retry|{joined}"
+    return {"inline_keyboard": [[
+        {"text": "🔁 重试失败项", "callback_data": data},
+        {"text": "📋 今日状态", "callback_data": "status"},
+    ]]}
+
+
+def menu_keyboard() -> dict:
+    """/start、/menu 或 /help 时给的四个入口"""
+    return {"inline_keyboard": [
+        [{"text": "📋 今日状态", "callback_data": "status"},
+         {"text": "▶️ 运行全部", "callback_data": "run"}],
+        [{"text": "🔁 重试未签到", "callback_data": "retry"},
+         {"text": "❓ 帮助", "callback_data": "help"}],
+    ]}
+
+
 @dataclass
 class TelegramNotifier:
     cfg: TelegramConfig
@@ -73,7 +100,8 @@ class TelegramNotifier:
         token = self.cfg.bot_token.strip()
         return token[:8] + "***" + token[-4:] if len(token) > 14 else "***"
 
-    def send(self, text: str, disable_notification: bool = False) -> bool:
+    def send(self, text: str, disable_notification: bool = False,
+             reply_markup: Optional[dict] = None) -> bool:
         """发一条消息；失败抛 TelegramError（调用方决定是否只记日志）"""
         if not self.ready:
             raise TelegramError("Telegram 未启用或未填写 bot_token / chat_id")
@@ -85,6 +113,8 @@ class TelegramNotifier:
         }
         if disable_notification:
             payload["disable_notification"] = True
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
         via = "代理" if self.cfg.use_proxy else "直连"
         try:
             resp = net.request("POST", self._url("sendMessage"), json=payload,
@@ -105,5 +135,10 @@ class TelegramNotifier:
         """给测试按钮用：带一条明确前缀，方便辨认"""
         return self.send(f"<b>签到助手 · 测试消息</b>\n{_esc(text)}")
 
-    def send_summary(self, rows: Sequence[tuple[str, bool, str]]) -> bool:
-        return self.send(summarize(rows))
+    def send_summary(self, rows: Sequence[tuple[str, bool, str]],
+                     failed_ids: Optional[Sequence[str]] = None) -> bool:
+        """发汇总；有失败时附「重试失败项」按钮（failed_ids 传任务 id，没传就用任务名兜底）"""
+        failed = list(failed_ids) if failed_ids is not None else \
+            [name for name, success, _ in rows if not success]
+        return self.send(summarize(rows),
+                         reply_markup=retry_keyboard(failed) if failed else None)
