@@ -117,10 +117,15 @@ class TelegramNotifier:
             payload["reply_markup"] = reply_markup
         via = "代理" if self.cfg.use_proxy else "直连"
         try:
+            # fallback="auto"：没在「全局设置」里填代理时，自动找本机代理
+            # （Clash / v2rayN 之类常开着但没配到程序里，直连 api.telegram.org 必然超时）
             resp = net.request("POST", self._url("sendMessage"), json=payload,
-                               timeout=20, use_proxy=bool(self.cfg.use_proxy))
+                               timeout=20, use_proxy=bool(self.cfg.use_proxy),
+                               fallback="auto")
         except Exception as e:
-            raise TelegramError(f"网络请求失败（{via}，bot {self._masked()}）: {e}") from e
+            _, route = net.resolve(bool(self.cfg.use_proxy), "auto")
+            raise TelegramError(
+                f"网络请求失败（{via}·{route}，bot {self._masked()}）: {e}") from e
         try:
             data = resp.json()
         except Exception:

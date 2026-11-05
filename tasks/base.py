@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib
 import pkgutil
+import socket
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional
@@ -167,7 +168,63 @@ class BaseTask(ABC):
                 self.result_shots.append(shot_path)
             except Exception:
                 pass
-            return TaskResult(self.id, False, f"任务异常: {e}", screenshots=self.result_shots)
+            msg = f"任务异常: {e}"
+            hint = self.net_error_hint(e)
+            if hint:
+                msg += f"\n{hint}"
+            return TaskResult(self.id, False, msg, screenshots=self.result_shots)
+
+    # ---------- 网络错误诊断 ----------
+    # Playwright 会把 Chromium 的 net error 原样抛出来（net::ERR_XXX），
+    # 光看这行字符串没法判断是「站点挂了 / 本机 hosts 劫持 / 代理没开」，
+    # 所以这里补一句能照着做的结论。
+    NET_ERROR_HINTS = {
+        "ERR_CONNECTION_REFUSED": "本机主动拒绝了连接：检查 hosts 是否把该域名指到 127.0.0.1；"
+                                  "若任务勾了「走代理」，确认代理软件在跑（端口没起来就是拒连）",
+        "ERR_CONNECTION_RESET": "连接被重置：多为该域名被网络阻断，给这个任务开「走代理」再试",
+        "ERR_CONNECTION_TIMED_OUT": "连接超时：线路不通或站点被墙，给这个任务开「走代理」再试",
+        "ERR_TIMED_OUT": "连接超时：线路不通或站点被墙，给这个任务开「走代理」再试",
+        "ERR_NAME_NOT_RESOLVED": "域名解析失败：检查网络/DNS；若站点换了域名，改任务配置里的 task.url",
+        "ERR_INTERNET_DISCONNECTED": "系统网络已断开，检查网线/Wi-Fi",
+        "ERR_PROXY_CONNECTION_FAILED": "连不上代理：核对「全局设置 → 代理」的地址与端口，确认代理软件已启动",
+        "ERR_TUNNEL_CONNECTION_FAILED": "代理隧道建立失败：代理软件没开或端口不对",
+        "ERR_CERT_AUTHORITY_INVALID": "证书校验失败：可能有抓包/中间人代理，检查代理软件的证书设置",
+    }
+
+    def net_error_hint(self, err: Exception) -> str:
+        """把 net::ERR_XXX 翻译成结论；不是网络错误则返回空串"""
+        text = str(err or "")
+        tip = ""
+        for key, value in self.NET_ERROR_HINTS.items():
+            if key in text:
+                tip = value
+                break
+        if not tip:
+            return ""
+
+        browser = getattr(self.ctx, "browser", None)
+        no_proxy = getattr(browser, "_no_proxy", None)
+        if no_proxy is True:
+            route = "本次为直连（任务未勾选「走代理」）"
+        elif no_proxy is False:
+            route = "本次走代理"
+        else:
+            route = ""
+
+        parts = [f"网络诊断：{tip}"]
+        if route:
+            parts.append(route)
+        host = urlparse(self.cfg.url or "").hostname or ""
+        if host:
+            try:
+                ips = sorted({info[4][0] for info in socket.getaddrinfo(host, None)})
+                joined = ", ".join(ips[:3])
+                parts.append(f"{host} 解析到 {joined}")
+                if any(ip.startswith(("127.", "0.0.0.0")) for ip in ips):
+                    parts.append("解析结果是本机地址，基本可以确定是 hosts 文件写死了该域名")
+            except Exception as e:
+                parts.append(f"{host} 解析失败（{type(e).__name__}）")
+        return " | ".join(parts)
 
     # ---------- 钩子（子类按需覆盖） ----------
     def needs_browser(self) -> bool:

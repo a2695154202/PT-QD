@@ -29,6 +29,30 @@ class NexusPHPTask(BaseTask):
     SEL_CAPTCHA_INPUT = "form[action='takelogin.php'] input[name='imagestring']"
     SEL_SUBMIT = "form[action='takelogin.php'] input[type='submit']"
 
+    # ---- 独立「两步验证页」选择器 ----
+    # 注意：登录表单里的 2FA 字段（SEL_ONECODE）和登录后跳转的独立 2FA 页是两回事。
+    # 杜比等站点现在把 2FA 做成单独一页，提交账号密码后才出现，之前只填登录表单内的字段，
+    # 于是「触发了验证码却没人填」。这里覆盖常见的输入框命名。
+    SEL_2FA_CANDIDATES = (
+        "input[name='2fa']",                       # 杜比 / 部分 NexusPHP 变体
+        "input[name='oneCode']",                   # 原生 NexusPHP
+        "input[name='two_step_code']",             # hhanclub 风格
+        "input[name='code'][maxlength='6']",
+        "input[id*='otp']",
+        "input[name*='otp']",
+        "input[id*='totp']",
+        "input[name*='totp']",
+        "input[autocomplete='one-time-code']",
+        "input[maxlength='6']",
+    )
+    SEL_2FA_SUBMIT_CANDIDATES = (
+        "form input[type='submit'][value*='验']",
+        "form button[type='submit']",
+        "form input[type='submit']",
+        "button:has-text('验证')",
+        "button:has-text('提交')",
+    )
+
     # ---- 登录后才会出现的标志 ----
     LOGGED_IN_MARKERS = (
         "a[href*='logout.php']",
@@ -90,6 +114,81 @@ class NexusPHPTask(BaseTask):
             self.log(f"2FA 已启用: {tfa.describe()}")
         else:
             self.logger.warning("任务勾选了 2FA 但未找到可用密钥，本次将不填 2FA")
+
+    # ---------- 独立两步验证页 ----------
+    async def find_2fa_input(self) -> str:
+        """探测「独立两步验证页」的输入框。
+
+        登录表单还在的时候不认：表单内的 2FA 字段由 SEL_ONECODE 负责，
+        在这里重复填会把提交顺序打乱。支持 options.sel_2fa_input 覆盖。
+        """
+        browser = self.ctx.browser
+        if await self.has_login_form():
+            return ""
+        page = browser.page
+        candidates = []
+        cfg_sel = (self.cfg.options.get("sel_2fa_input") or "").strip()
+        if cfg_sel:
+            candidates.append(cfg_sel)
+        candidates.extend(self.SEL_2FA_CANDIDATES)
+        for sel in candidates:
+            try:
+                loc = page.locator(sel).first
+                if await loc.count() > 0 and await loc.is_visible():
+                    return sel
+            except Exception:
+                continue
+        return ""
+
+    async def _find_2fa_submit(self) -> str:
+        page = self.ctx.browser.page
+        candidates = []
+        cfg_sel = (self.cfg.options.get("sel_2fa_submit") or "").strip()
+        if cfg_sel:
+            candidates.append(cfg_sel)
+        candidates.extend(self.SEL_2FA_SUBMIT_CANDIDATES)
+        for sel in candidates:
+            try:
+                loc = page.locator(sel).first
+                if await loc.count() > 0 and await loc.is_visible():
+                    return sel
+            except Exception:
+                continue
+        return ""
+
+    async def submit_2fa(self) -> bool:
+        """在独立两步验证页填动态码并提交，返回提交后是否已是登录态"""
+        browser = self.ctx.browser
+        sel = await self.find_2fa_input()
+        if not sel:
+            self.logger.warning("页面上没找到两步验证输入框")
+            return False
+        if not self.ctx.totp:
+            raise TaskError(
+                "站点要求两步验证，但没有可用的 2FA 密钥。"
+                "请在任务配置勾选「有 2FA」并填写 2FA 密钥（或把密钥存进凭证库）"
+            )
+        if self.ctx.totp.remaining() < 5:
+            wait_s = self.ctx.totp.remaining() + 1
+            self.log(f"2FA 验证码即将过期，等待 {wait_s}s 进入新周期")
+            await browser.wait_timeout(wait_s * 1000)
+        code = self.ctx.totp.now_code()
+        await browser.fill(sel, code)
+        self.log(f"已在两步验证页填入验证码（{code}，剩余 {self.ctx.totp.remaining()}s 有效）")
+
+        btn = await self._find_2fa_submit()
+        if btn:
+            await browser.click(btn)
+            self.log("已提交两步验证码")
+        else:
+            self.logger.warning("未找到两步验证提交按钮，尝试回车提交")
+            try:
+                await browser.action_pause()
+                await browser.page.keyboard.press("Enter")
+            except Exception:
+                pass
+        await browser.wait_timeout(3000)
+        return await self.is_logged_in()
 
     # ---------- 登录态判定 ----------
     async def is_logged_in(self) -> bool:
@@ -182,6 +281,16 @@ class NexusPHPTask(BaseTask):
                     self.log("CookieCloud 同步后已恢复登录态")
                     return True
                 self.log("CookieCloud 同步后仍未登录，转入账号密码登录")
+            return await self.login_with_password()
+
+        # 上次登录走到一半被打断时，可能停在独立两步验证页：直接补填动态码
+        if await self.find_2fa_input():
+            self.log("当前页面要求两步验证，直接填动态验证码")
+            if await self.submit_2fa():
+                self.log("两步验证通过")
+                self.events.emit(Events.LOGIN_SUCCESS, task_id=self.id)
+                return True
+            self.log("两步验证未通过，转入账号密码登录")
             return await self.login_with_password()
 
         await self.ctx.browser.wait_timeout(1500)
@@ -298,6 +407,21 @@ class NexusPHPTask(BaseTask):
                 await browser.wait_timeout(3000)
                 if self.cfg.has_cf:
                     await self.handle_challenge_if_any()
+
+                # 登录后可能跳到独立两步验证页（杜比现在就是这么做的）：填动态码再提交
+                if await self.find_2fa_input():
+                    self.log("进入两步验证页")
+                    if await self.submit_2fa():
+                        self.log("两步验证通过，登录成功")
+                        self.events.emit(Events.LOGIN_SUCCESS, task_id=self.id)
+                        return True
+                    self.log("两步验证未通过，重新打开站点后重试")
+                    self.events.emit(Events.LOGIN_FAILED, task_id=self.id, attempt=attempt)
+                    if self.note_login_failure("两步验证未通过") >= limit:
+                        break
+                    await self.open_site()
+                    await browser.wait_timeout(1000)
+                    continue
 
                 if await self.is_logged_in():
                     self.log("登录成功")

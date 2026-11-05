@@ -175,7 +175,8 @@ def cmd_test_telegram(args) -> None:
         print("Telegram 未启用：请在「全局设置 → 通知」里填写 bot_token / chat_id 并勾选启用")
         sys.exit(1)
     via = "代理" if tcfg.use_proxy else "直连"
-    print(f"正在发送测试消息（{via}）…")
+    _, route = net.resolve(bool(tcfg.use_proxy), "auto")
+    print(f"正在发送测试消息（{via}·{route}）…")
     try:
         TelegramNotifier(tcfg).send_text("配置正常，签到汇总会推送到这个会话。")
     except Exception as e:
@@ -193,8 +194,9 @@ def cmd_show_config(args) -> None:
     print(f"AI             : {'已启用' if cfg.ai.enabled else '未启用'} | {cfg.ai.base_url} | model={cfg.ai.model}")
     print(f"CookieCloud    : {'已启用' if cfg.cookiecloud.enabled else '未启用'} | {cfg.cookiecloud.server}")
     tg = cfg.telegram
+    _, tg_route = net.resolve(bool(tg.use_proxy), "auto")
     print(f"Telegram       : {'已启用' if tg.ready else '未启用'} | chat={tg.chat_id or '-'}"
-          f" | {'走代理' if tg.use_proxy else '直连'}")
+          f" | {tg_route}")
     print(f"日志           : {_abs(cfg.log_file)} ({cfg.log_level})")
     print()
     _print_task_table(load_task_configs())

@@ -425,7 +425,8 @@ class SettingsDialog(tk.Toplevel):
             row=6, column=1, sticky="w", **pad)
         ttk.Label(tab_tg,
                   text="用法：@BotFather 建 bot 拿 token → 先给 bot 发一条消息 → 把 chat_id 填进来。\n"
-                       "「走代理」复用「代理」页里配置的地址；没配代理时会直连并提示。",
+                       "「走代理」优先用「代理」页里填的地址；没填时自动使用本机代理（Clash/v2rayN 等），\n"
+                       "都没有才直连（国内直连 api.telegram.org 通常超时）。",
                   foreground="gray", font=("", 8), justify="left").grid(
             row=7, column=0, columnspan=2, sticky="w", **pad)
 

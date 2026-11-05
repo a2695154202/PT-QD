@@ -59,6 +59,7 @@ class TelegramBot:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._offset = 0
+        self._hinted = False            # 网络提示只打一次，避免日志刷屏
         self._notifier = TelegramNotifier(cfg, self.logger)
 
     # ---------- 生命周期 ----------
@@ -84,7 +85,7 @@ class TelegramBot:
     def _call(self, method: str, payload: Optional[dict] = None, timeout: int = 25) -> dict:
         url = f"{API_BASE}/bot{self.cfg.bot_token.strip()}/{method}"
         resp = net.request("POST", url, json=payload or {}, timeout=timeout,
-                           use_proxy=bool(self.cfg.use_proxy))
+                           use_proxy=bool(self.cfg.use_proxy), fallback="auto")
         try:
             data = resp.json()
         except Exception:
@@ -110,11 +111,31 @@ class TelegramBot:
             self.logger.warning(f"answerCallbackQuery 失败: {e}")
 
     # ---------- 轮询 ----------
+    def _hint_network(self, route: str) -> None:
+        """网络不通时给一次能照着做的提示，而不是每 5 秒刷一次同样的报错"""
+        if self._hinted:
+            return
+        self._hinted = True
+        self.logger.warning(
+            f"连不上 api.telegram.org（当前走：{route}）。"
+            "国内直连通常不通，请二选一：①启动 Clash/v2rayN 等代理客户端；"
+            "②在「全局设置 → 代理」填写地址（如 127.0.0.1:7897）并勾选启用。"
+            "签到任务本身不受影响。"
+        )
+
     def _loop(self) -> None:
+        route = "直连"
+        try:
+            _, route = net.resolve(bool(self.cfg.use_proxy), "auto")
+            self.logger.info(f"Telegram 交互网络：{route}")
+        except Exception:
+            pass
         try:
             self._call("setMyCommands", {"commands": BOT_COMMANDS}, timeout=15)
         except Exception as e:
-            self.logger.warning(f"注册命令菜单失败（不影响使用）: {e}")
+            self.logger.warning(f"注册命令菜单失败（网络不通时交互不可用）: {e}")
+            self._hint_network(route)
+        backoff = 5
         while not self._stop.is_set():
             try:
                 data = self._call("getUpdates", {
@@ -125,9 +146,22 @@ class TelegramBot:
             except Exception as e:
                 if self._stop.is_set():
                     break
-                self.logger.warning(f"Telegram 轮询失败，5 秒后重试: {e}")
-                self._stop.wait(5)
+                text = str(e)
+                if "409" in text or "terminated by other" in text:
+                    # 同一个 bot 只能有一个实例在轮询，常见于新旧版本同时开着
+                    self.logger.warning(
+                        "Telegram 轮询冲突：已有另一个实例在用这个 bot_token，"
+                        "请关掉多余的签到助手窗口（60 秒后重试）")
+                    backoff = 60
+                else:
+                    self.logger.warning(f"Telegram 轮询失败，{backoff} 秒后重试: {e}")
+                    self._hint_network(route)
+                self._stop.wait(backoff)
+                if self._stop.is_set():
+                    break
+                backoff = min(backoff * 2, 60)
                 continue
+            backoff = 5
             for upd in data.get("result") or []:
                 self._offset = max(self._offset, int(upd.get("update_id", 0)) + 1)
                 try:
