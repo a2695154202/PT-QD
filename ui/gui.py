@@ -11,8 +11,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import queue
+import sys
 import threading
+import time
 import tkinter as tk
+import traceback
 from datetime import datetime
 from tkinter import filedialog, messagebox, ttk
 
@@ -43,26 +47,120 @@ def _short_msg(text: str, limit: int = 42) -> str:
 
 
 class TextHandler(logging.Handler):
-    """把日志输出到 Tk Text 控件（线程安全）"""
+    """把日志输出到 Tk Text 控件。
+
+    日志可能来自任务线程、Telegram 长轮询线程，而 **Tkinter 不是线程安全的**：
+    在别的线程里直接 widget.after() / insert() 有机会把主循环卡死，
+    表现就是「程序一打开界面就卡死」。所以这里只把日志塞进队列，
+    由主线程定时取出来写控件（attach() 必须在主线程调用一次）。
+    """
+
+    MAX_LINES = 4000        # 控件里最多保留多少行，长跑才不会越拖越慢
+    MAX_QUEUE = 5000        # 队列上限：日志刷屏时宁可丢，也不阻塞
 
     def __init__(self, text_widget: tk.Text):
         super().__init__()
         self.text = text_widget
         self.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", "%H:%M:%S"))
+        self._queue: "queue.Queue[str]" = queue.Queue(maxsize=self.MAX_QUEUE)
+        self._attached = False
 
     def emit(self, record):
+        """任意线程都会调到这里：只入队，不碰控件"""
         try:
-            msg = self.format(record)
+            self._queue.put_nowait(self.format(record))
+        except Exception:
+            pass            # 队列满 / 窗口已销毁：丢弃这一行，不抛异常
 
-            def append():
-                self.text.configure(state="normal")
-                self.text.insert("end", msg + "\n")
-                self.text.see("end")
-                self.text.configure(state="disabled")
+    def attach(self, interval_ms: int = 150):
+        """由主线程接管刷新（只能调一次）"""
+        if self._attached:
+            return
+        self._attached = True
+        self._drain(interval_ms)
 
-            self.text.after(0, append)
+    def _drain(self, interval_ms: int):
+        lines = []
+        try:
+            while len(lines) < 300:
+                lines.append(self._queue.get_nowait())
+        except queue.Empty:
+            pass
         except Exception:
             pass
+        if lines:
+            try:
+                self.text.configure(state="normal")
+                self.text.insert("end", "\n".join(lines) + "\n")
+                extra = int(self.text.index("end-1c").split(".")[0]) - self.MAX_LINES
+                if extra > 0:
+                    self.text.delete("1.0", f"{extra + 1}.0")
+                self.text.see("end")
+                self.text.configure(state="disabled")
+            except tk.TclError:
+                return                  # 窗口已关闭，停止轮询
+        try:
+            self.text.after(interval_ms, lambda: self._drain(interval_ms))
+        except tk.TclError:
+            pass
+
+
+# 主线程待执行的回调队列：任何后台线程要改界面都往这里放（见 post_to_ui）
+_UI_QUEUE: "queue.Queue" = queue.Queue()
+
+
+def post_to_ui(fn) -> None:
+    """把回调交给 Tk 主线程执行。
+
+    后台线程（任务队列、Telegram 轮询）**绝对不要**直接调 root.after()/控件方法，
+    统一走这里，由主窗口的定时器取出来执行。
+    """
+    try:
+        _UI_QUEUE.put_nowait(fn)
+    except Exception:
+        pass
+
+
+class FreezeWatchdog(threading.Thread):
+    """界面卡死看门狗：主线程心跳停了，就把主线程调用栈写进日志文件。
+
+    界面冻住的时候文件日志仍然能写，事后能看出是哪一步卡住的。
+    只记录、不做任何恢复动作，避免误伤正在跑的 Tk 主循环。
+    """
+
+    def __init__(self, threshold: float = 10.0, interval: float = 2.0):
+        super().__init__(name="ui-watchdog", daemon=True)
+        self.threshold = threshold
+        self.interval = interval
+        self._beat_at = time.time()
+        self._stop_event = threading.Event()
+        self._reported = False
+        self._main_tid = threading.main_thread().ident
+
+    def beat(self) -> None:
+        self._beat_at = time.time()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+    def run(self) -> None:
+        while not self._stop_event.wait(self.interval):
+            stalled = time.time() - self._beat_at
+            if stalled < self.threshold:
+                self._reported = False
+                continue
+            if self._reported:
+                continue
+            self._reported = True
+            try:
+                frame = sys._current_frames().get(self._main_tid)
+                stack = "".join(traceback.format_stack(frame)) if frame else "(取不到主线程栈)"
+            except Exception as e:
+                stack = f"(取栈失败: {e})"
+            try:
+                LOGGER.error(f"界面主线程已卡住 {stalled:.0f} 秒，调用栈：\n{stack}")
+            except Exception:
+                pass
 
 
 class TaskEditDialog(tk.Toplevel):
@@ -589,10 +687,10 @@ class SettingsDialog(tk.Toplevel):
         def work():
             try:
                 TelegramNotifier(cfg).send_text("配置正常，签到汇总会推送到这个会话。")
-                self.after(0, lambda: messagebox.showinfo("发送成功", "已发送，请到 Telegram 查看"))
+                post_to_ui(lambda: messagebox.showinfo("发送成功", "已发送，请到 Telegram 查看"))
             except Exception as e:
                 msg = str(e)
-                self.after(0, lambda: messagebox.showerror("发送失败", msg))
+                post_to_ui(lambda: messagebox.showerror("发送失败", msg))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -669,10 +767,34 @@ class SigninApp:
         self._day = today_str()
         self._tg_bot = None
         self._build()
+        self._watchdog = FreezeWatchdog()
+        self._watchdog.start()
+        self.root.after(150, self._drain_ui_queue)
         self.root.after(30000, self._watch_day)
         self.root.after(5000, self._schedule_tick)
         self.root.after(1200, self._start_telegram_bot)     # 等界面出来再连 TG
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    # ---------- 主线程回调泵 ----------
+    def _drain_ui_queue(self) -> None:
+        """把后台线程排进来的回调在主线程执行（不要在别的线程碰 Tk）"""
+        if getattr(self, "_watchdog", None) is not None:
+            self._watchdog.beat()
+        for _ in range(50):
+            try:
+                fn = _UI_QUEUE.get_nowait()
+            except queue.Empty:
+                break
+            except Exception:
+                break
+            try:
+                fn()
+            except Exception as e:
+                LOGGER.warning(f"界面回调执行失败: {e}")
+        try:
+            self.root.after(150, self._drain_ui_queue)
+        except tk.TclError:
+            pass          # 窗口已关闭
 
     # ---------- Telegram 简单交互 ----------
     def _start_telegram_bot(self) -> None:
@@ -728,7 +850,7 @@ class SigninApp:
             return "没有启用的任务。"
         if self._running:
             return "已经有一个任务队列在跑，等它跑完再来。"
-        self.root.after(0, lambda: self._run_async(ids, silent=True))
+        post_to_ui(lambda: self._run_async(ids, silent=True))
         return f"已开始运行 {len(ids)} 个任务，跑完会把汇总推回来。"
 
     def _tg_retry(self, ids=None) -> str:
@@ -742,12 +864,14 @@ class SigninApp:
             return "没有需要重试的任务：今天都已经签到了。"
         if self._running:
             return "已经有一个任务队列在跑，等它跑完再来。"
-        self.root.after(0, lambda: self._run_async(target, silent=True))
+        post_to_ui(lambda: self._run_async(target, silent=True))
         names = "、".join(by_id.get(t, t) for t in target)
         return f"已开始重试 {len(target)} 个任务：{names}"
 
     def _on_close(self) -> None:
         self._stop_telegram_bot()
+        if getattr(self, "_watchdog", None) is not None:
+            self._watchdog.stop()
         try:
             self.root.destroy()
         except Exception:
@@ -877,6 +1001,7 @@ class SigninApp:
         handler = TextHandler(self.log_text)
         LOGGER.addHandler(handler)
         LOGGER.setLevel(logging.INFO)
+        handler.attach()          # 主线程接管刷新，后台日志只入队
 
         self.refresh_tasks()
 
@@ -1015,10 +1140,7 @@ class SigninApp:
 
         def _ui(call):
             """把回调排到主线程执行；窗口已关闭时静默丢弃，避免线程里抛 TclError"""
-            try:
-                self.root.after(0, call)
-            except Exception:
-                pass
+            post_to_ui(call)
 
         def worker():
             async def main():
@@ -1086,13 +1208,13 @@ class SigninApp:
                 LOGGER.info(f"二维码导入成功：新增 {added}，更新 {updated}")
                 for a in accounts:
                     LOGGER.info(f"  - {a.issuer or '(无issuer)'} / {a.account}")
-                self.root.after(0, self.refresh_tasks)
-                self.root.after(0, lambda: messagebox.showinfo(
+                post_to_ui(self.refresh_tasks)
+                post_to_ui(lambda: messagebox.showinfo(
                     "导入成功", f"共导入 {len(accounts)} 个 2FA 账号到凭证库。\n"
                                 f"可在任务「配置」中选择绑定哪个验证器。"))
             except Exception as e:
                 err_text = str(e)
-                self.root.after(0, lambda t=err_text: messagebox.showerror("导入失败", t))
+                post_to_ui(lambda t=err_text: messagebox.showerror("导入失败", t))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1101,15 +1223,15 @@ class SigninApp:
             from core.ai import AIClient
             ai = AIClient(AppConfig.load().ai)
             if not ai.available:
-                self.root.after(0, lambda: messagebox.showwarning(
+                post_to_ui(lambda: messagebox.showwarning(
                     "AI 未配置", "请在「全局设置 → AI 模型」中填写 base_url / api_key / model"))
                 return
             try:
                 reply = ai.chat("请只回复两个字：可用")
-                self.root.after(0, lambda: messagebox.showinfo("AI 测试", f"连接成功: {reply}"))
+                post_to_ui(lambda: messagebox.showinfo("AI 测试", f"连接成功: {reply}"))
             except Exception as e:
                 err_text = str(e)
-                self.root.after(0, lambda t=err_text: messagebox.showerror("AI 测试失败", t))
+                post_to_ui(lambda t=err_text: messagebox.showerror("AI 测试失败", t))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1118,11 +1240,11 @@ class SigninApp:
             from core.cookiecloud import CookieCloudClient
             cfg = AppConfig.load().cookiecloud
             if not cfg.enabled:
-                self.root.after(0, lambda: messagebox.showwarning(
+                post_to_ui(lambda: messagebox.showwarning(
                     "未启用", "请在「全局设置 → CookieCloud」中填写并启用"))
                 return
             ok, msg = CookieCloudClient(cfg).test_connection()
-            self.root.after(0, lambda: (messagebox.showinfo if ok else messagebox.showerror)(
+            post_to_ui(lambda: (messagebox.showinfo if ok else messagebox.showerror)(
                 "CookieCloud 测试", msg))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -1139,8 +1261,13 @@ class SigninApp:
 
 def run_gui():
     import os
+    t0 = time.perf_counter()
+    frozen = bool(getattr(sys, "frozen", False))
+    LOGGER.info(f"界面启动中…（Python {sys.version.split()[0]}，打包={frozen}）")
     root = tk.Tk()
+    LOGGER.info(f"Tk 初始化完成（{(time.perf_counter() - t0) * 1000:.0f}ms）")
     SigninApp(root)
+    LOGGER.info(f"界面初始化完成（{(time.perf_counter() - t0) * 1000:.0f}ms）")
     # 便于打包冒烟测试：设置 SIGNIN_SMOKE_MS 后自动关闭
     smoke = os.environ.get("SIGNIN_SMOKE_MS")
     if smoke:
