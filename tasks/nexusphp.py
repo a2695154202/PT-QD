@@ -49,9 +49,27 @@ class NexusPHPTask(BaseTask):
         "form input[type='submit'][value*='验']",
         "form button[type='submit']",
         "form input[type='submit']",
+        # 站点把 <form> 写在 <table> 的行之间（杜比的 take2fa.php 就是），浏览器会
+        # 把 <form> 元素"提"到表格外面，输入框靠 form 归属指针挂着，但不是 DOM 祖先，
+        # 于是 `form[action=...] input` 这种后代选择器命中 0 个 —— 必须有不带 form 前缀的候选
+        "input[type='submit'][value*='提交验证']",
+        "input[type='submit'][value*='验证']",
+        "button:has-text('提交验证')",
+        "input[type='submit']",
         "button:has-text('验证')",
         "button:has-text('提交')",
     )
+
+    # ---- 「两步验证挑战页」的识别标志 ----
+    # 关键：这一页通常带完整导航栏（退出 / 用户中心 / 签到入口），
+    # 只靠「有没有 logout 链接」判登录态会误判成已登录 → 没人填码，任务跳到签到页又被弹回来。
+    SEL_2FA_PAGE_MARKERS = (
+        "form[action*='take2fa']",          # 杜比：提交两步验证码的表单
+        "form[action*='2fa']",
+        "a[href*='recover2fa']",            # 「丢失了两步验证码？点击此处找回」
+        "a[href*='recover_2fa']",
+    )
+    URL_2FA_HINTS = ("2fa.php", "take2fa", "two-step", "two_step", "2fa?")
 
     # ---- 登录后才会出现的标志 ----
     LOGGED_IN_MARKERS = (
@@ -188,10 +206,48 @@ class NexusPHPTask(BaseTask):
             except Exception:
                 pass
         await browser.wait_timeout(3000)
-        return await self.is_logged_in()
+
+        if await self.is_logged_in():
+            return True
+        # 还停在验证页 = 没提交成功或码被拒，说清楚状态，别只留一句「未识别」
+        if await self.is_2fa_page():
+            value = ""
+            try:
+                value = await self.ctx.browser.page.input_value(sel) or ""
+            except Exception:
+                pass
+            self.logger.warning(
+                f"提交后仍停在两步验证页（输入框当前内容 {'空' if not value else value}），"
+                "可能是验证码被拒、或站点不接受这次提交")
+        return False
 
     # ---------- 登录态判定 ----------
+    async def is_2fa_page(self) -> bool:
+        """当前是不是「两步验证挑战页」（提交密码后要求填动态码的那一页）。
+
+        杜比的 2fa.php 带着完整导航栏和「退出」链接，但它**不算登录成功**
+        （页面自己写着「完成两步验证登录后才计算为成功登录」）。
+        所以登录态判定必须先排除这一页，否则任务会以为已经登录，
+        直接去签到页 → 又被弹回 2fa.php → 最后报「结果未识别」。
+        """
+        try:
+            url = (await self.ctx.browser.url() or "").lower()
+        except Exception:
+            url = ""
+        if any(h in url for h in self.URL_2FA_HINTS):
+            return True
+        page = self.ctx.browser.page
+        for sel in self.SEL_2FA_PAGE_MARKERS:
+            try:
+                if await page.query_selector(sel) is not None:
+                    return True
+            except Exception:
+                continue
+        return bool(await self.find_2fa_input())
+
     async def is_logged_in(self) -> bool:
+        if await self.is_2fa_page():
+            return False
         page = self.ctx.browser.page
         for sel in self.LOGGED_IN_MARKERS:
             try:
@@ -293,6 +349,11 @@ class NexusPHPTask(BaseTask):
             self.log("两步验证未通过，转入账号密码登录")
             return await self.login_with_password()
 
+        if await self.is_2fa_page():
+            raise TaskError(
+                "页面是两步验证页，但没找到验证码输入框（可能站点改版或页面没加载完）。"
+                "可在任务配置里用 sel_2fa_input 指定输入框选择器")
+
         await self.ctx.browser.wait_timeout(1500)
         if await self.is_logged_in():
             self.log("已登录（跳转完成后确认）")
@@ -346,6 +407,14 @@ class NexusPHPTask(BaseTask):
             raise TaskError(self.login_lock_message())
         self.log(f"登录预算：已失败 {self.login_used()}/{limit} 次，本次最多再试 {remaining} 次")
         for attempt in range(1, remaining + 1):
+            # 停在两步验证页时（密码已经对了，只差动态码）先补填，别重新提交密码
+            if await self.find_2fa_input():
+                self.log("当前停在两步验证页，先补填动态验证码")
+                if await self.submit_2fa():
+                    self.log("两步验证通过，登录成功")
+                    self.events.emit(Events.LOGIN_SUCCESS, task_id=self.id)
+                    return True
+                self.log("两步验证未通过，重新走账号密码登录")
             if await self.is_logged_in():
                 self.log("已是登录状态，跳过登录")
                 return True

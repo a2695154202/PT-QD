@@ -224,7 +224,27 @@ class BaseTask(ABC):
                     parts.append("解析结果是本机地址，基本可以确定是 hosts 文件写死了该域名")
             except Exception as e:
                 parts.append(f"{host} 解析失败（{type(e).__name__}）")
-        return " | ".join(parts)
+        parts.append(self.proxy_advice(no_proxy))
+        return " | ".join(p for p in parts if p)
+
+    def proxy_advice(self, no_proxy: Optional[bool]) -> str:
+        """直连失败时，告诉用户「其实可以走代理」以及该填什么地址"""
+        if no_proxy is False:
+            return ""                       # 已经在走代理了，建议没意义
+        try:
+            proxy = getattr(getattr(self.ctx, "app_cfg", None), "proxy", None)
+            if proxy is not None and getattr(proxy, "ready", False):
+                if getattr(self.cfg, "use_proxy", False):
+                    return ""
+                return f"已配置代理 {proxy.server}，但本任务没勾「走代理」→ 勾上再试"
+            from core import net
+            found = net.discover_proxy()
+            if found:
+                return (f"检测到本机代理 {found}：在「全局设置 → 代理」填这个地址并启用，"
+                        "再给本任务勾「走代理」")
+        except Exception:
+            pass
+        return "本站点直连不通时可给任务勾「走代理」（需先在全局设置里填代理地址）"
 
     # ---------- 钩子（子类按需覆盖） ----------
     def needs_browser(self) -> bool:
