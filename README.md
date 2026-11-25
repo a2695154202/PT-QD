@@ -9,7 +9,7 @@
 |------|------|
 | 浏览器控制 | 程序启动 Edge（带远程调试端口 9222，可 `edge://inspect` 挂接调试）或连接已运行的 Edge；支持点击、填表、截取页面指定位置图片 |
 | 2FA（TOTP） | 导入谷歌身份验证器二维码（`otpauth://` 与 `otpauth-migration://` 导出格式均支持）；**任务级勾选是否有 2FA，并可指定绑定凭证库中的哪个验证器** |
-| AI 能力（用户配置） | OpenAI 兼容接口；识别登录/签到页的图形验证码（CF 人机验证不再调用 AI） |
+| AI 能力（用户配置） | OpenAI 兼容接口；识别登录/签到页的图形验证码（CF 人机验证不再调用 AI）；**可配多条线路，主用失败自动切备用** |
 | CookieCloud | 输入服务器/UUID/密钥，本地 AES 解密同步 cookie；工作模式：**覆盖到浏览器 / 暂停同步**，默认同步全部站点；**在打开站点之前就把 cookie 注入浏览器** |
 | 代理 | 全局设置代理地址（http/socks5 + 可选账号密码）；任务配置里勾选「本任务走代理」才使用，未勾选的任务强制直连（**本程序从不使用 Windows 系统代理**） |
 | Telegram 通知 | 跑完一遍任务后把签到汇总推到手机：成功/失败数量 + 每个任务一行结论；默认**走代理**（`use_proxy: true`），可设「只在失败时推送」；有失败时附「🔁 重试失败项」按钮，支持 `/status` `/run` `/retry` 菜单交互 |
@@ -73,9 +73,25 @@ python main.py run pt_kong  # 命令行运行任务
 ```yaml
 ai:
   enabled: true
+  # 单线路（老写法，仍然支持；没配 providers 时用它）
   base_url: "https://api.openai.com/v1"   # 任意 OpenAI 兼容接口
   api_key: "sk-..."
   model: "gpt-4o-mini"                    # 验证码识别需支持视觉的模型
+
+  # 多线路（推荐）：列表顺序即优先级，第 1 个主用，其余备用
+  providers:
+    - name: "主用 OpenAI"
+      base_url: "https://api.openai.com/v1"
+      api_key: "sk-xxx"
+      model: "gpt-4o-mini"
+      vision_model: "gpt-4o"        # 识图用；留空则复用 model
+      timeout: 60
+    - name: "备用 某中转"
+      base_url: "https://api.example.com/v1"
+      api_key: "sk-yyy"
+      model: "gpt-4o-mini"
+      timeout: 60
+  failover_cooldown: 120            # 某条线路失败后，多久内不再尝试（秒）
 
 cookiecloud:
   enabled: true
@@ -125,6 +141,45 @@ AI 识别与 CookieCloud 请求同样遵守这条规则（`trust_env=False`，�
 | `ERR_PROXY_CONNECTION_FAILED` | 连不上代理 | 核对代理地址/端口，确认代理软件已启动 |
 
 诊断里还会附上「本次为直连 / 本次走代理」和域名的实际解析结果，便于判断是站点问题还是网络问题。
+
+### AI 主备切换（配多个接口，主用挂了自动换）
+
+「全局设置 → AI 模型」页现在是一个**线路列表**，第 1 行是主用，下面都是备用：
+
+| 操作 | 说明 |
+|---|---|
+| 添加 / 编辑 / 删除 | 每条线路独立配置 base_url、api_key、模型、视觉模型、超时 |
+| ↑ 提前 / ↓ 延后 | 调整优先级，第 1 行就是主用（也可以理解为「设为主 AI」） |
+| 测试选中 / 全部测试 | 立刻按这条（或全部）线路发一句「请只回复两个字：可用」 |
+
+自动切换规则：
+
+1. 按顺序尝试：主用 → 备用1 → 备用2……；
+2. 触发切换的失败包括：**连接超时、HTTP 4xx（额度用尽 / key 失效）、返回不是 JSON、`choices` 为空**；
+3. 失败的那条线路冷却 `failover_cooldown` 秒（默认 120），期间排到最后，不让每次识别都先撞一遍坏线路；
+4. 哪条线路成功了，本次运行后续识别就**一直用它**（黏住），直到它也失败再继续往后找；
+5. 只有全部线路都失败才抛错，错误里会写清每条线路各自的原因。
+
+日志里能看到切换过程：
+
+```
+[WARNING] AI [主用 OpenAI] 调用失败（120s 内不再尝试）：HTTP 429: rate limit exceeded
+[WARNING] AI 已切到 备用 某中转（gpt-4o-mini）
+[INFO]    AI 识图 由备用线路 备用 某中转 完成
+```
+
+命令行也会逐条报：
+
+```bash
+签到助手.exe test-ai
+# AI 线路：主用 主用 OpenAI（gpt-4o-mini），备用 备用 某中转
+#   [主用] 主用 OpenAI: 成功（回复: 可用）
+#   [备用1] 备用 某中转: 失败（HTTP 401: invalid api key）
+# 有 1 路失败，签到时会自动用其它可用线路
+```
+
+> 只有单条线路时行为与以前完全一致：没配 `providers` 就用 `base_url/api_key/model`，
+> 老配置文件不用改。
 
 ### Telegram 通知（跑完自动汇报）
 

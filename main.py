@@ -148,14 +148,27 @@ def cmd_test_ai(args) -> None:
     cfg = AppConfig.load()
     ai = AIClient(cfg.ai)
     if not ai.available:
-        print("AI 未配置：请在 config/config.yaml 的 ai 节点填写 base_url / api_key / model")
+        print("AI 未配置：请在 config/config.yaml 的 ai 节点填写 base_url / api_key / model"
+              "（或配置 ai.providers 多路供应商）")
         sys.exit(1)
-    try:
-        reply = ai.chat("请只回复两个字：可用")
-        print(f"AI 连接成功，回复: {reply}")
-    except Exception as e:
-        print(f"AI 连接失败: {e}")
+    print(f"AI 线路：{ai.describe()}")
+    results = ai.probe()
+    if not results:
+        print("没有可用的供应商（base_url / api_key 没填全）")
         sys.exit(1)
+    failed = 0
+    for i, (label, ok, msg) in enumerate(results, start=1):
+        role = "主用" if i == 1 else f"备用{i - 1}"
+        if ok:
+            print(f"  [{role}] {label}: 成功（回复: {msg}）")
+        else:
+            failed += 1
+            print(f"  [{role}] {label}: 失败（{msg}）")
+    if failed == len(results):
+        print("全部供应商都失败")
+        sys.exit(1)
+    if failed:
+        print(f"有 {failed} 路失败，签到时会自动用其它可用线路")
 
 
 def cmd_test_cookiecloud(args) -> None:
@@ -191,7 +204,7 @@ def cmd_show_config(args) -> None:
           + (f" ({cfg.browser.cdp_endpoint})" if cfg.browser.mode == "attach"
              else f" (调试端口 {cfg.browser.debugging_port})"))
     print(f"用户数据目录   : {cfg.browser.user_data_dir_abs}")
-    print(f"AI             : {'已启用' if cfg.ai.enabled else '未启用'} | {cfg.ai.base_url} | model={cfg.ai.model}")
+    print(f"AI             : {'已启用' if cfg.ai.enabled else '未启用'} | {cfg.ai.describe()}")
     print(f"CookieCloud    : {'已启用' if cfg.cookiecloud.enabled else '未启用'} | {cfg.cookiecloud.server}")
     tg = cfg.telegram
     _, tg_route = net.resolve(bool(tg.use_proxy), "auto")

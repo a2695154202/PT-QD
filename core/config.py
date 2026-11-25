@@ -58,10 +58,60 @@ def _as_bool(value, default: bool = False) -> bool:
     return bool(value)
 
 
+def _as_int(value, default: int = 0) -> int:
+    """健壮整数解析：YAML 里手写的 "60" / "60s" / 空值都能兜住"""
+    if isinstance(value, bool):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        try:
+            return int(float(str(value).strip().rstrip("sS秒")))
+        except (TypeError, ValueError):
+            return default
+
+
+def _clean_providers(raw) -> list:
+    """把 YAML/界面里拿到的供应商列表洗成干净的 dict 列表。
+
+    - 丢掉不是 dict 的项、以及没填接口地址的项
+    - 缺字段补默认值、timeout 统一成 int
+    - 保持列表顺序（顺序就是主用 → 备用的优先级）
+    """
+    out = []
+    if not isinstance(raw, list):
+        return out
+    for i, item in enumerate(raw):
+        if isinstance(item, dict):
+            base = str(item.get("base_url") or "").strip()
+            if not base:
+                continue
+            out.append({
+                "name": str(item.get("name") or "").strip() or f"AI {i + 1}",
+                "base_url": base,
+                "api_key": str(item.get("api_key") or "").strip(),
+                "model": str(item.get("model") or "").strip() or "gpt-4o-mini",
+                "vision_model": str(item.get("vision_model") or "").strip(),
+                "timeout": _as_int(item.get("timeout"), 60) or 60,
+            })
+        elif hasattr(item, "base_url"):          # 直接塞了 AIProvider
+            base = (getattr(item, "base_url", "") or "").strip()
+            if not base:
+                continue
+            out.append({
+                "name": (getattr(item, "name", "") or "").strip() or f"AI {i + 1}",
+                "base_url": base,
+                "api_key": (getattr(item, "api_key", "") or "").strip(),
+                "model": (getattr(item, "model", "") or "").strip() or "gpt-4o-mini",
+                "vision_model": (getattr(item, "vision_model", "") or "").strip(),
+                "timeout": _as_int(getattr(item, "timeout", 60), 60) or 60,
+            })
+    return out
+
+
 @dataclass
 class BrowserConfig:
-    mode: str = "launch"                    # launch=程序启动Edge; attach=连接已运行的Edge
-    cdp_endpoint: str = "http://127.0.0.1:9222"
+    mode: str = "launch"                    # launch=程序启动Edge; attach=连接已运行的Edge    cdp_endpoint: str = "http://127.0.0.1:9222"
     debugging_port: int = 9222              # launch 模式下开放的远程调试端口
     user_data_dir: str = "data/edge_profile"
     headless: bool = False
@@ -81,13 +131,56 @@ class BrowserConfig:
 
 
 @dataclass
-class AIConfig:
-    enabled: bool = False
+class AIProvider:
+    """一组 AI 接口配置（OpenAI 兼容）。
+
+    多个供应商按列表顺序排优先级：第一个是「主用」，后面都是「备用」。
+    主用调不通（超时 / 401 / 额度用尽 / 返回格式异常）会自动切到下一个。
+    """
+    name: str = ""
     base_url: str = "https://api.openai.com/v1"
     api_key: str = ""
     model: str = "gpt-4o-mini"
     vision_model: str = ""                  # 留空则复用 model
     timeout: int = 60
+
+    @property
+    def ready(self) -> bool:
+        """能不能用：地址和 key 都填了"""
+        return bool((self.base_url or "").strip() and (self.api_key or "").strip())
+
+    @property
+    def label(self) -> str:
+        """日志/界面里怎么称呼它"""
+        return (self.name or "").strip() or _host_of(self.base_url) or "未命名"
+
+    def with_model(self, vision: bool = False) -> str:
+        """取该线路实际要用的模型名；视觉模型留空时回落普通模型"""
+        if vision:
+            return (self.vision_model or "").strip() or (self.model or "").strip()
+        return (self.model or "").strip()
+
+
+def _host_of(url: str) -> str:
+    try:
+        from urllib.parse import urlparse
+        return (urlparse((url or "").strip()).hostname or "").strip()
+    except Exception:
+        return ""
+
+
+@dataclass
+class AIConfig:
+    enabled: bool = False
+    # ---- 旧字段：只配置了一个 AI 时用它（保持向后兼容）----
+    base_url: str = "https://api.openai.com/v1"
+    api_key: str = ""
+    model: str = "gpt-4o-mini"
+    vision_model: str = ""                  # 留空则复用 model
+    timeout: int = 60
+    # ---- 多供应商：列表顺序即优先级，第一个是主用 ----
+    providers: list = field(default_factory=list)
+    failover_cooldown: int = 120            # 某个供应商失败后，多久内不再尝试（秒）
     prompts: dict = field(default_factory=lambda: {
         "captcha": (
             "这是一张网站登录/签到用的图形验证码图片，通常是4位字母数字。"
@@ -98,6 +191,73 @@ class AIConfig:
             "不要输出任何解释、标点或多余字符。"
         ),
     })
+
+    # ---------- 供应商列表 ----------
+    def normalized_providers(self) -> list:
+        """把配置整理成 AIProvider 列表（按优先级）。
+
+        - 配了 providers → 用它们（丢掉地址或 key 不全的）
+        - 没配 providers → 用旧字段拼一个，保证老配置文件照常能用
+        """
+        out: list[AIProvider] = []
+        raw = self.providers if isinstance(self.providers, list) else []
+        for i, item in enumerate(raw):
+            if isinstance(item, AIProvider):
+                p = item
+            elif isinstance(item, dict):
+                p = AIProvider(
+                    name=str(item.get("name") or ""),
+                    base_url=str(item.get("base_url") or "").strip(),
+                    api_key=str(item.get("api_key") or "").strip(),
+                    model=str(item.get("model") or "").strip(),
+                    vision_model=str(item.get("vision_model") or "").strip(),
+                    timeout=_as_int(item.get("timeout"), 60),
+                )
+            else:
+                continue
+            if not p.base_url:
+                continue
+            if not p.name:
+                p.name = _host_of(p.base_url) or f"AI {i + 1}"
+            if not p.model:
+                p.model = "gpt-4o-mini"
+            out.append(p)
+        if out:
+            return out
+        legacy = AIProvider(
+            name="默认",
+            base_url=(self.base_url or "").strip(),
+            api_key=(self.api_key or "").strip(),
+            model=(self.model or "").strip() or "gpt-4o-mini",
+            vision_model=(self.vision_model or "").strip(),
+            timeout=self.timeout or 60,
+        )
+        return [legacy] if legacy.base_url else []
+
+    def ready_providers(self) -> list:
+        return [p for p in self.normalized_providers() if p.ready]
+
+    def mirror_primary(self) -> None:
+        """把主用供应商写回旧字段，老版本/命令行看到的仍是同一套配置"""
+        ps = self.normalized_providers()
+        if not ps:
+            return
+        p = ps[0]
+        self.base_url = p.base_url
+        self.api_key = p.api_key
+        self.model = p.model
+        self.vision_model = p.vision_model
+        self.timeout = p.timeout or 60
+
+    def describe(self) -> str:
+        """一句话说明当前 AI 线路，给命令行/日志用"""
+        ready = self.ready_providers()
+        if not ready:
+            return "未配置可用线路（缺 api_key 或 base_url）"
+        if len(ready) == 1:
+            return f"{ready[0].label}（{ready[0].model}）"
+        backup = "、".join(p.label for p in ready[1:])
+        return f"主用 {ready[0].label}（{ready[0].model}），备用 {backup}"
 
 
 @dataclass
@@ -214,14 +374,23 @@ class AppConfig:
             merged_prompts.update({k: v for k, v in cfg.ai.prompts.items()
                                    if isinstance(v, str) and v.strip()})
             cfg.ai.prompts = merged_prompts
+        # AI 供应商列表：洗掉脏数据，数值字段统一类型（手写的 "60s" 之类也能兜住）
+        cfg.ai.providers = _clean_providers(cfg.ai.providers)
+        cfg.ai.enabled = _as_bool(cfg.ai.enabled, False)
+        cfg.ai.timeout = _as_int(cfg.ai.timeout, 60) or 60
+        cfg.ai.failover_cooldown = _as_int(cfg.ai.failover_cooldown, 120)
         return cfg
 
     def save(self, path: Optional[Path] = None) -> str:
         path = path or (CONFIG_DIR / "config.yaml")
         Path(path).parent.mkdir(parents=True, exist_ok=True)
+        ai_data = {f.name: getattr(self.ai, f.name) for f in AIConfig.__dataclass_fields__.values()}
+        ai_data["providers"] = _clean_providers(self.ai.providers)   # AIProvider 对象转 dict
+        ai_data["timeout"] = _as_int(ai_data.get("timeout"), 60) or 60
+        ai_data["failover_cooldown"] = _as_int(ai_data.get("failover_cooldown"), 120)
         data = {
             "browser": {f.name: getattr(self.browser, f.name) for f in BrowserConfig.__dataclass_fields__.values()},
-            "ai": {f.name: getattr(self.ai, f.name) for f in AIConfig.__dataclass_fields__.values()},
+            "ai": ai_data,
             "cookiecloud": {f.name: getattr(self.cookiecloud, f.name)
                             for f in CookieCloudConfig.__dataclass_fields__.values()},
             "proxy": {f.name: getattr(self.proxy, f.name) for f in ProxyConfig.__dataclass_fields__.values()},
@@ -236,6 +405,9 @@ class AppConfig:
             "# browser.mode: launch=程序启动Edge并开放调试端口；attach=连接已运行的Edge\n"
             "# browser.fullscreen / always_on_top: 启动后全屏 / 窗口置顶（仅 Windows 生效）\n"
             "# ai: 任意 OpenAI 兼容接口；识别验证码需支持视觉的模型\n"
+            "#     providers 是供应商列表，**顺序即优先级**：第 1 个是主用，其余是备用；\n"
+            "#     主用超时/401/额度用尽会自动切到下一个（failover_cooldown 秒内不再试它）。\n"
+            "#     没配 providers 时退回上面的 base_url/api_key/model 单配置，老配置照常可用。\n"
             "# cookiecloud.mode: overwrite=拉取并覆盖到浏览器 / paused=暂停同步\n"
             "# proxy: 全局代理；任务配置里勾选「走代理」的任务才使用它。\n"
             "#        没配置代理 / 或本任务没勾选时一律直连，**从不使用 Windows 系统代理**\n"

@@ -19,8 +19,10 @@ import tkinter as tk
 import traceback
 from datetime import datetime
 from tkinter import filedialog, messagebox, ttk
+from typing import Optional
 
-from core.config import AppConfig, load_task_configs
+from core.ai import AIClient
+from core.config import AIConfig, AppConfig, _as_int, _clean_providers, load_task_configs
 from core import net
 from core.telegram import _esc
 from core.telegram_bot import TelegramBot
@@ -373,6 +375,70 @@ class TaskEditDialog(tk.Toplevel):
             messagebox.showerror("保存失败", str(e))
 
 
+class AIProviderDialog(tk.Toplevel):
+    """单个 AI 供应商的编辑窗口（地址 / key / 模型 / 超时）"""
+
+    FIELDS = (
+        ("name", "名称（备注用）", False),
+        ("base_url", "接口地址 base_url", False),
+        ("api_key", "API Key", True),
+        ("model", "模型 model", False),
+        ("vision_model", "视觉模型（留空=用 model）", False),
+        ("timeout", "超时（秒）", False),
+    )
+
+    def __init__(self, master, data: Optional[dict] = None, title: str = "AI 供应商"):
+        super().__init__(master)
+        self.result: Optional[dict] = None
+        self.title(title)
+        self.resizable(False, False)
+        self.transient(master)
+        self.grab_set()
+
+        base = dict(data or {})
+        self.vars: dict[str, tk.StringVar] = {}
+        first = None
+        for i, (key, label, secret) in enumerate(self.FIELDS):
+            ttk.Label(self, text=label).grid(row=i, column=0, sticky="w", padx=12, pady=6)
+            var = tk.StringVar(value=str(base.get(key, "") or ""))
+            entry = ttk.Entry(self, textvariable=var, width=46)
+            if secret:
+                entry.configure(show="*")
+            entry.grid(row=i, column=1, sticky="we", padx=12, pady=6)
+            self.vars[key] = var
+            first = first or entry
+
+        btns = ttk.Frame(self)
+        btns.grid(row=len(self.FIELDS), column=0, columnspan=2, sticky="e", padx=12, pady=10)
+        ttk.Button(btns, text="保存", command=self._ok, width=10).pack(side="right", padx=4)
+        ttk.Button(btns, text="取消", command=self.destroy, width=10).pack(side="right", padx=4)
+
+        self.bind("<Return>", lambda e: self._ok())
+        self.bind("<Escape>", lambda e: self.destroy())
+        if first is not None:
+            first.focus_set()
+
+    def _ok(self) -> None:
+        base_url = self.vars["base_url"].get().strip()
+        if not base_url:
+            messagebox.showerror("缺少配置", "接口地址 base_url 不能为空", parent=self)
+            return
+        if "://" not in base_url:
+            messagebox.showerror(
+                "地址格式不对",
+                "base_url 要带协议，例如 https://api.openai.com/v1", parent=self)
+            return
+        self.result = {
+            "name": self.vars["name"].get().strip(),
+            "base_url": base_url,
+            "api_key": self.vars["api_key"].get().strip(),
+            "model": self.vars["model"].get().strip() or "gpt-4o-mini",
+            "vision_model": self.vars["vision_model"].get().strip(),
+            "timeout": _as_int(self.vars["timeout"].get(), 60) or 60,
+        }
+        self.destroy()
+
+
 class SettingsDialog(tk.Toplevel):
     """全局设置对话框"""
 
@@ -381,7 +447,7 @@ class SettingsDialog(tk.Toplevel):
         self.cfg = AppConfig.load()
         self.on_saved = on_saved
         self.title("全局设置")
-        self.geometry("600x560")
+        self.geometry("680x620")
         self.resizable(False, False)
         self.transient(master)
         self.grab_set()
@@ -397,26 +463,47 @@ class SettingsDialog(tk.Toplevel):
         tab_ai = ttk.Frame(nb, padding=8)
         nb.add(tab_ai, text="AI 模型")
         self.ai_enabled = tk.BooleanVar()
-        self.ai_base = tk.StringVar()
-        self.ai_key = tk.StringVar()
-        self.ai_model = tk.StringVar()
-        self.ai_vision = tk.StringVar()
+        self.ai_cooldown = tk.StringVar(value="120")
+        self.ai_providers: list[dict] = []      # 顺序即优先级：第 1 个是主用
+
         ttk.Checkbutton(tab_ai, text="启用 AI（验证码识别 / CF 挑战 / 滑块需要）",
-                        variable=self.ai_enabled).grid(row=0, column=0, columnspan=2, sticky="w", **pad)
-        for i, (label, var) in enumerate([("接口地址 base_url", self.ai_base),
-                                          ("API Key", self.ai_key),
-                                          ("模型 model", self.ai_model),
-                                          ("视觉模型（可留空）", self.ai_vision)], start=1):
-            ttk.Label(tab_ai, text=label).grid(row=i, column=0, sticky="w", **pad)
-            e = ttk.Entry(tab_ai, textvariable=var, width=48)
-            e.grid(row=i, column=1, sticky="w", **pad)
-            if label == "API Key":
-                e.configure(show="*")
+                        variable=self.ai_enabled).grid(
+            row=0, column=0, columnspan=4, sticky="w", **pad)
+
+        cols = ("role", "name", "base", "model")
+        self.tv_ai = ttk.Treeview(tab_ai, columns=cols, show="headings", height=7)
+        for cid, text, width in (("role", "角色", 56), ("name", "名称", 110),
+                                 ("base", "接口地址", 230), ("model", "模型", 110)):
+            self.tv_ai.heading(cid, text=text)
+            self.tv_ai.column(cid, width=width, anchor="w",
+                              stretch=(cid == "base"))
+        self.tv_ai.grid(row=1, column=0, columnspan=4, sticky="we", **pad)
+        self.tv_ai.bind("<Double-1>", lambda e: self._edit_provider())
+
+        ops = ttk.Frame(tab_ai)
+        ops.grid(row=2, column=0, columnspan=4, sticky="w", **pad)
+        for text, cmd in (("添加", self._add_provider),
+                          ("编辑", self._edit_provider),
+                          ("删除", self._del_provider),
+                          ("↑ 提前", lambda: self._move_provider(-1)),
+                          ("↓ 延后", lambda: self._move_provider(1)),
+                          ("测试选中", self._test_provider),
+                          ("全部测试", self._test_all_providers)):
+            ttk.Button(ops, text=text, command=cmd, width=9).pack(side="left", padx=3)
+
+        ttk.Label(tab_ai, text="失败冷却").grid(row=3, column=0, sticky="w", **pad)
+        ttk.Entry(tab_ai, textvariable=self.ai_cooldown, width=6).grid(
+            row=3, column=1, sticky="w", **pad)
+        ttk.Label(tab_ai, text="秒（这条线路失败后，这么久内不再尝试它）",
+                  foreground="gray", font=("", 8)).grid(
+            row=3, column=2, columnspan=2, sticky="w", **pad)
+
         ttk.Label(tab_ai,
-                  text="AI 只用于识别登录/签到页的图形验证码；CF 人机验证由浏览器"
-                       "自行处理（元素定位点击 / 拖动滑块），不再调用 AI。",
+                  text="列表第 1 行是主用，下面都是备用。主用超时 / 401 / 额度用尽 / 返回格式异常，\n"
+                       "自动切到下一行继续识别，并把失败线路冷却一段时间；本次运行里谁成功就一直用它。\n"
+                       "AI 只用于识别图形验证码；CF 人机验证由浏览器自己处理，不调用 AI。",
                   foreground="gray", font=("", 8), justify="left").grid(
-            row=5, column=0, columnspan=2, sticky="w", **pad)
+            row=4, column=0, columnspan=4, sticky="w", **pad)
 
         # --- CookieCloud ---
         tab_cc = ttk.Frame(nb, padding=8)
@@ -633,10 +720,7 @@ class SettingsDialog(tk.Toplevel):
     def _load(self):
         c = self.cfg
         self.ai_enabled.set(c.ai.enabled)
-        self.ai_base.set(c.ai.base_url)
-        self.ai_key.set(c.ai.api_key)
-        self.ai_model.set(c.ai.model)
-        self.ai_vision.set(c.ai.vision_model)
+        self._load_providers()
         self.cc_enabled.set(c.cookiecloud.enabled)
         self.cc_mode.set(c.cookiecloud.mode if c.cookiecloud.mode in ("overwrite", "paused") else "overwrite")
         self.cc_server.set(c.cookiecloud.server)
@@ -694,13 +778,127 @@ class SettingsDialog(tk.Toplevel):
 
         threading.Thread(target=work, daemon=True).start()
 
+    # ---------- AI 供应商列表 ----------
+    def _load_providers(self) -> None:
+        """读配置填列表；老配置（只有单组 base_url/model）也显示成一行方便直接改"""
+        c = self.cfg.ai
+        self.ai_providers = [dict(p) for p in _clean_providers(c.providers)]
+        if not self.ai_providers and (c.base_url or c.api_key):
+            self.ai_providers = [{
+                "name": "默认", "base_url": c.base_url, "api_key": c.api_key,
+                "model": c.model or "gpt-4o-mini",
+                "vision_model": c.vision_model, "timeout": c.timeout or 60,
+            }]
+        self.ai_cooldown.set(str(c.failover_cooldown or 120))
+        self._refresh_provider_tree()
+
+    def _refresh_provider_tree(self, select: int = 0) -> None:
+        self.tv_ai.delete(*self.tv_ai.get_children())
+        for i, p in enumerate(self.ai_providers):
+            role = "主用" if i == 0 else f"备用{i}"
+            self.tv_ai.insert("", "end", iid=str(i), values=(
+                role, p.get("name", ""), p.get("base_url", ""), p.get("model", "")))
+        rows = self.tv_ai.get_children()
+        if rows:
+            idx = min(max(select, 0), len(rows) - 1)
+            self.tv_ai.selection_set(rows[idx])
+            self.tv_ai.focus(rows[idx])
+
+    def _selected_provider_index(self) -> Optional[int]:
+        sel = self.tv_ai.selection()
+        if not sel:
+            return None
+        try:
+            idx = int(sel[0])
+        except (TypeError, ValueError):
+            return None
+        return idx if 0 <= idx < len(self.ai_providers) else None
+
+    def _add_provider(self) -> None:
+        dlg = AIProviderDialog(self, {"name": "", "base_url": "https://api.openai.com/v1",
+                                      "model": "gpt-4o-mini", "timeout": 60},
+                               title="添加 AI 供应商")
+        self.wait_window(dlg)
+        if not dlg.result:
+            return
+        self.ai_providers.append(dlg.result)
+        self._refresh_provider_tree(select=len(self.ai_providers) - 1)
+
+    def _edit_provider(self) -> None:
+        idx = self._selected_provider_index()
+        if idx is None:
+            messagebox.showinfo("提示", "先在列表里选一行", parent=self)
+            return
+        dlg = AIProviderDialog(self, self.ai_providers[idx], title="编辑 AI 供应商")
+        self.wait_window(dlg)
+        if not dlg.result:
+            return
+        self.ai_providers[idx] = dlg.result
+        self._refresh_provider_tree(select=idx)
+
+    def _del_provider(self) -> None:
+        idx = self._selected_provider_index()
+        if idx is None:
+            messagebox.showinfo("提示", "先在列表里选一行", parent=self)
+            return
+        name = self.ai_providers[idx].get("name") or self.ai_providers[idx].get("base_url", "")
+        if not messagebox.askyesno("删除确认", f"删除这个 AI 供应商？\n{name}", parent=self):
+            return
+        self.ai_providers.pop(idx)
+        self._refresh_provider_tree(select=idx - 1)
+
+    def _move_provider(self, delta: int) -> None:
+        idx = self._selected_provider_index()
+        if idx is None:
+            return
+        target = idx + delta
+        if not (0 <= target < len(self.ai_providers)):
+            return
+        self.ai_providers[idx], self.ai_providers[target] = \
+            self.ai_providers[target], self.ai_providers[idx]
+        self._refresh_provider_tree(select=target)
+
+    def _probe_async(self, providers: list, title: str) -> None:
+        """在后台线程里试这些线路（用临时配置，不动已保存的设置）"""
+        if not providers:
+            messagebox.showinfo("提示", "没有可测试的供应商", parent=self)
+            return
+        cfg = AIConfig(enabled=True, providers=[dict(p) for p in providers],
+                       failover_cooldown=0, timeout=30)
+        for p in cfg.providers:
+            p["timeout"] = _as_int(p.get("timeout"), 30) or 30
+
+        def work():
+            lines = []
+            try:
+                results = AIClient(cfg).probe()
+            except Exception as e:
+                results = [("(异常)", False, str(e))]
+            for label, ok, msg in results:
+                lines.append(f"{'✅' if ok else '❌'} {label}：{msg}")
+            text = "\n".join(lines) or "没有可用配置（缺 api_key / base_url）"
+            ok_any = any(ok for _, ok, _ in results)
+            post_to_ui(lambda: (messagebox.showinfo if ok_any else messagebox.showerror)(
+                title, text))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _test_provider(self) -> None:
+        idx = self._selected_provider_index()
+        if idx is None:
+            messagebox.showinfo("提示", "先在列表里选一行", parent=self)
+            return
+        self._probe_async([self.ai_providers[idx]], "AI 测试")
+
+    def _test_all_providers(self) -> None:
+        self._probe_async(list(self.ai_providers), "AI 全部测试")
+
     def _save(self):
         c = self.cfg
         c.ai.enabled = bool(self.ai_enabled.get())
-        c.ai.base_url = self.ai_base.get().strip()
-        c.ai.api_key = self.ai_key.get().strip()
-        c.ai.model = self.ai_model.get().strip()
-        c.ai.vision_model = self.ai_vision.get().strip()
+        c.ai.providers = [dict(p) for p in self.ai_providers]
+        c.ai.failover_cooldown = _as_int(self.ai_cooldown.get(), 120) or 120
+        c.ai.mirror_primary()          # 老字段（base_url/api_key/model）跟着主用走
         c.cookiecloud.enabled = bool(self.cc_enabled.get())
         c.cookiecloud.mode = self.cc_mode.get() or "overwrite"
         c.cookiecloud.server = self.cc_server.get().strip()
