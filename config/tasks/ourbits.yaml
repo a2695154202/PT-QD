@@ -1,0 +1,48 @@
+# ============ OurBits（OB）每日签到任务配置 ============
+# 站点：NexusPHP（https://ourbits.club）
+# 登录页：/login.php，字段 username / password / 2fa_code（有设置两步验证才填）
+#         ——没有图形验证码
+# 签到链路：attendance.php → 点「签到」→ 站点自动弹 Cloudflare 人机验证
+#           → 验证通过后自动完成签到（不需要再点一次）
+#
+# 执行方式：桌面模式（和当年人人任务同一套）
+#   用你平时那个正常浏览器打开站点，由 AI 看屏幕截图识图点击过 CF 并签到。
+#   需要：① 已配置 AI（视觉模型）② 装了 Microsoft Edge
+task:
+  id: ourbits
+  name: "OurBits（OB）"
+  enabled: false                 # 填好账号密码后再改成 true（或直接在界面里勾选）
+  url: "https://ourbits.club/"
+
+account:
+  username: ""                   # 请填写 OurBits 用户名
+  password: ""                   # 请填写 OurBits 密码
+  two_step:
+    enabled: false               # 账号开了两步验证就改成 true（登录表单里的 2fa_code）
+    secret: ""                   # 直接填 base32 密钥（可选，填了优先用它）
+    vault_key: ""                # 留空则按站点域名自动匹配凭证库
+
+options:
+  has_2fa: false                 # 账号设置了两步验证时改成 true
+  has_cf: true                   # 本站有人机验证（桌面模式由 AI 识图处理；自动化模式交给 CFHandler）
+  use_proxy: false               # 打不开站点时：全局设置里填好代理，这里改 true
+
+  # ---- 桌面模式（默认，也是推荐方式）----
+  desktop_mode: true             # false = 退回 Playwright 自动化（排查问题用）
+  desktop_profile: "data/desktop_profile"   # 正常浏览器用的独立 profile（cookie 存在这里）
+  normal_maximized: true         # 正常浏览器最大化
+  normal_topmost: true           # 正常浏览器置顶（AI 识图时别被别的窗口盖住）
+  keep_normal_open: false        # 跑完是否留着浏览器（想看结果就改 true）
+  desktop_startup_wait: 6        # 打开浏览器后等几秒再开始识图（等页面渲染 / CF 初判）
+  desktop_max_steps: 20          # 识图点击最多几步（卡住时调大，如 30）
+
+  # ---- 登录（CookieCloud 的 cookie 失效时才走）----
+  pydoll_login: true             # 用 pydoll 登录：无 WebDriver 指纹，实测不触发 CF
+  pydoll_headed: true            # pydoll 显示窗口（方便排查；确认稳定后可改 false）
+  max_login_retry: 2             # 登录失败次数上限（跨天累计，只有登录成功才清零）
+
+  # ---- 自动化模式（desktop_mode: false 时用）----
+  checkin_url: "/attendance.php"
+  checkin_btn: "input[type='submit'][value*='签到']"
+
+  schedule_time: "09:40"

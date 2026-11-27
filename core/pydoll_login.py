@@ -32,6 +32,8 @@ SEL_USER = "username"
 SEL_PASS = "password"
 SEL_CAPTCHA_INPUT = "imagestring"
 SEL_ONECODE = "scode"
+# 两步验证字段各站命名不统一：audiences=scode / ourbits=2fa_code / 原生 NexusPHP=oneCode
+SEL_ONECODE_CANDIDATES = ("scode", "2fa_code", "oneCode", "two_step_code", "2fa", "code")
 SEL_SUBMIT_TEXTS = ("登录", "登陆", "Login", "登录/注册")
 
 
@@ -131,8 +133,12 @@ class PydollLogin:
     async def run(self, username: str, password: str,
                   recognize_captcha: Optional[Callable[[bytes], Awaitable[str]]] = None,
                   totp_code: str = "", dry_run: bool = False,
-                  captcha_prompt: str = "captcha") -> tuple[bool, str, list[dict]]:
-        """返回 (是否登录成功, 说明, cookies)"""
+                  captcha_prompt: str = "captcha",
+                  onecode_names: Optional[tuple[str, ...]] = None) -> tuple[bool, str, list[dict]]:
+        """返回 (是否登录成功, 说明, cookies)
+
+        onecode_names: 两步验证输入框的 name 候选（按顺序找第一个存在的）
+        """
         from pydoll.browser import Chrome
 
         options = build_options(self.profile_dir, headless=self.headless,
@@ -158,7 +164,8 @@ class PydollLogin:
                     captcha_msg = await self._solve_captcha(tab, recognize_captcha, captcha_prompt)
 
                 if totp_code:
-                    await self._fill(tab, SEL_ONECODE, totp_code, optional=True)
+                    await self._fill_first(tab, onecode_names or SEL_ONECODE_CANDIDATES,
+                                           totp_code)
 
                 if dry_run:
                     return False, f"dry-run：已填入账号/密码{captcha_msg}，未提交", []
@@ -228,6 +235,26 @@ class PydollLogin:
                 self.logger.info(f"可选字段 {name} 填写跳过：{e}")
                 return
             raise
+
+    async def _fill_first(self, tab, names, value: str) -> str:
+        """按候选 name 顺序找第一个存在的输入框填值，返回用到的 name（没找到返回空串）"""
+        for name in names or ():
+            el = None
+            try:
+                el = await tab.find(name=name, timeout=2, raise_exc=False)
+            except Exception:
+                el = None
+            if el is None:
+                continue
+            try:
+                await el.clear()
+                await el.type_text(value, humanize=True)
+                self.logger.info(f"已填入两步验证码（name={name}）")
+                return name
+            except Exception as e:
+                self.logger.info(f"两步验证码填写失败（name={name}）：{e}")
+        self.logger.info(f"登录页没有两步验证输入框（试过 {list(names or ())}），跳过")
+        return ""
 
     async def _solve_captcha(self, tab, recognize_captcha, prompt_key: str) -> str:
         """截取验证码图片交给 AI，填入输入框（失败重试一次，pydoll 偶发返回 str）"""
@@ -304,8 +331,10 @@ class PydollLogin:
 async def pydoll_login(profile_dir: str, login_url: str, username: str, password: str,
                        recognize_captcha=None, *, totp_code: str = "",
                        headless: bool = False, timeout_s: int = 90,
-                       dry_run: bool = False) -> tuple[bool, str, list[dict]]:
+                       dry_run: bool = False,
+                       onecode_names=None) -> tuple[bool, str, list[dict]]:
     """便捷入口：返回 (是否成功, 说明, cookies)"""
     login = PydollLogin(profile_dir, login_url, headless=headless, timeout_s=timeout_s)
     return await login.run(username, password, recognize_captcha=recognize_captcha,
-                           totp_code=totp_code, dry_run=dry_run)
+                           totp_code=totp_code, dry_run=dry_run,
+                           onecode_names=onecode_names)

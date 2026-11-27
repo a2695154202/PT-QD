@@ -91,6 +91,26 @@ class ProfileBridge:
             out.append(item)
         return out
 
+    async def _launch_ctx(self, pw, headless: bool = True):
+        """启动「调试侧」持久化上下文（用于写/读 profile 里的 cookie）。
+
+        为什么不用死 `channel="msedge"`：Playwright 的 channel 依赖系统里注册过的 Edge，
+        只装了 32 位 Edge 的机器上会直接抛 TargetClosedError，导致 cookie 根本写不进 profile。
+        所以这里先试 channel，失败就按 msedge.exe 的实际路径启动（Playwright 同样能驱动）。
+        """
+        kwargs = dict(user_data_dir=self.profile_abs, headless=headless,
+                      args=[f"--remote-debugging-port={self.port}"])
+        try:
+            return await pw.chromium.launch_persistent_context(channel="msedge", **kwargs)
+        except Exception as e:
+            exe = find_edge()
+            if not exe:
+                raise
+            self.logger.warning(
+                f"用 channel=msedge 启动浏览器失败（{type(e).__name__}），"
+                f"改为按可执行文件启动：{exe}")
+            return await pw.chromium.launch_persistent_context(executable_path=exe, **kwargs)
+
     async def inject_cookies(self, cookies: list[dict], days: int = 30) -> int:
         """用调试浏览器把 cookie 写进 profile（随后关闭，cookie 落盘）"""
         if not cookies:
@@ -101,12 +121,7 @@ class ProfileBridge:
         pw = await async_playwright().start()
         ctx = None
         try:
-            ctx = await pw.chromium.launch_persistent_context(
-                user_data_dir=self.profile_abs,
-                channel="msedge",
-                headless=True,
-                args=[f"--remote-debugging-port={self.port}"],
-            )
+            ctx = await self._launch_ctx(pw)
             await ctx.add_cookies(cookies)
             self.logger.info(f"已把 {len(cookies)} 个 cookie 写入 profile: {self.profile_abs}")
             return len(cookies)
@@ -123,10 +138,7 @@ class ProfileBridge:
         pw = await async_playwright().start()
         ctx = None
         try:
-            ctx = await pw.chromium.launch_persistent_context(
-                user_data_dir=self.profile_abs, channel="msedge", headless=True,
-                args=[f"--remote-debugging-port={self.port}"],
-            )
+            ctx = await self._launch_ctx(pw)
             return await ctx.cookies()
         finally:
             try:

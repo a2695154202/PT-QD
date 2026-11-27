@@ -13,7 +13,7 @@
 | CookieCloud | 输入服务器/UUID/密钥，本地 AES 解密同步 cookie；工作模式：**覆盖到浏览器 / 暂停同步**，默认同步全部站点；**在打开站点之前就把 cookie 注入浏览器** |
 | 代理 | 全局设置代理地址（http/socks5 + 可选账号密码）；任务配置里勾选「本任务走代理」才使用，未勾选的任务强制直连（**本程序从不使用 Windows 系统代理**） |
 | Telegram 通知 | 跑完一遍任务后把签到汇总推到手机：成功/失败数量 + 每个任务一行结论；默认**走代理**（`use_proxy: true`），可设「只在失败时推送」；有失败时附「🔁 重试失败项」按钮，支持 `/status` `/run` `/retry` 菜单交互 |
-| 签到任务 | 任务基类 + 注册表 + YAML 配置；任务可单独勾选是否有 2FA / CF 验证 / 走代理。内置 **PT-空（site-a.example）**、**HDDolby（site-b.example）**、**TTG 听听歌（site-c.example）**、**馒头 M-Team（site-d.example）**、**Akile（site-f.example，控制台「每日签到」）**、**憨憨 HHCLUB（site-g.example，attendance.php 停留即签到）** |
+| 签到任务 | 任务基类 + 注册表 + YAML 配置；任务可单独勾选是否有 2FA / CF 验证 / 走代理。内置 **PT-空（site-a.example）**、**HDDolby（site-b.example）**、**TTG 听听歌（site-c.example）**、**馒头 M-Team（site-d.example）**、**Akile（site-f.example，控制台「每日签到」）**、**憨憨 HHCLUB（site-g.example，attendance.php 停留即签到）**、**OurBits（ourbits.club，桌面模式过 CF）** |
 | 任务队列 | 严格串行：一个任务跑完再跑下一个；队列全部结束后才关闭浏览器（任务之间浏览器保持运行） |
 | 定时运行 | 全局设置里设「每天 HH:MM」自动签到；**在定时页里单独勾选要跑哪些任务**（与主界面勾选无关）；可勾选**跳过当天已签到的任务**、**错过时间点是否补跑**；每天只自动跑一次，状态栏显示下次运行时间 + 任务数（程序需保持打开） |
 | 运行日志 | 每次运行单独写入 `data/logs/run_日期_时间.log`；运行结束自动关闭浏览器 |
@@ -280,7 +280,9 @@ options:
 │   ├── ttg.py               # TTG 听听歌任务实现（多语言表单 + JS 签到）
 │   ├── mteam.py             # 馒头 M-Team 任务实现（React 单页应用 + 2FA + 保活）
 │   ├── akile.py             # Akile 任务（Vue 单页应用：登录 + 验证器 2FA + 控制台「每日签到」）
-│   └── hhan.py              # 憨憨 HHCLUB 任务（NexusPHP：图形验证码 + two_step_code，attendance.php 停留即签到）
+│   ├── hhan.py              # 憨憨 HHCLUB 任务（NexusPHP：图形验证码 + two_step_code，attendance.php 停留即签到）
+│   ├── ourbits.py           # OurBits（OB）任务（NexusPHP：表单内 2fa_code、无图形验证码、桌面模式过 CF）
+│   └── desktop_signin.py    # 桌面模式骨架：正常浏览器 + AI 识图点击（人人任务那套，可复用）
 ├── ui/gui.py                # Tkinter 界面（主窗口 + 任务配置 + 全局设置）
 └── data/                    # 运行时生成：Edge profile、截图、日志
 ```
@@ -397,6 +399,68 @@ Vue 单页应用，登录后进控制台点「每日签到」。
 - `已配置代理 X，但本任务没勾「走代理」→ 勾上再试`
 - `检测到本机代理 X：在「全局设置 → 代理」填这个地址并启用，再给本任务勾「走代理」`
 
+## OurBits（OB）签到流程（桌面模式）
+
+站点 `https://ourbits.club/`，NexusPHP。**这个任务走桌面模式**——和当年人人（Audiences）任务同一套：
+用你平时那个正常浏览器打开站点，由 AI 看屏幕截图识图点击，CF 看到的是普通浏览器 + 真人鼠标。
+
+### 站点结构（实测源码）
+
+登录页 `/login.php`：
+
+| 项目 | 值 |
+|---|---|
+| 表单 | `form[action='takelogin.php']`（页面里还有一个 GET 的语言切换表单，必须带 action 限定） |
+| 字段 | `username` / `password` / **`2fa_code`**（页面提示「如有设置则必填」） |
+| 图形验证码 | **没有**（所以 `SEL_CAPTCHA_IMG` 置空，不去等一张永远不出现的图） |
+| 提交 | `input[type='submit'][value='登录']` |
+
+登录后首页 `index.php`：`logout.php` / `userdetails.php` / `attendance.php`（签到得魔力）。
+
+### 签到链路（用户实测）
+
+打开 `attendance.php` → 点「签到」按钮 → **站点自动弹出 Cloudflare 人机验证** →
+**验证通过后自动完成签到**（不需要再点一次）。
+
+这条链路已经写进给 AI 的目标说明里，并且特意嘱咐：
+
+- 弹验证时**不要重复点签到按钮**（重复点会打断自动提交）；
+- 只是转圈/「请稍候」就等 2~3 秒再看，有复选框就点、有滑块就拖；
+- 首页和签到页常驻的「签到得魔力」入口、页面上显示的「魔力值 2,218.6」余额**都不算签到成功**。
+
+### 桌面模式的执行步骤
+
+1. 先杀掉上次遗留的、占着 profile 的浏览器（profile 被占用会导致 cookie 注入/登录失败）
+2. CookieCloud → 注入正常浏览器的 profile；没有 CookieCloud 就读 profile 里已有的 cookie
+3. 带 cookie 请求一次 `attendance.php` 判断登录态（不开浏览器，几秒出结果）
+4. 未登录 → **pydoll 登录**（直连 CDP、不设 `navigator.webdriver`，实测不触发 CF）
+   → 失败退回**调试浏览器（Playwright）登录**（能处理 2FA）
+5. 正常浏览器（**不带**调试端口，最大化 + 置顶）打开 `attendance.php`
+6. AI 看截图逐个动作操作，直到它自己 `finish`
+7. 收尾关掉浏览器（`keep_normal_open: true` 时留着给你看结果）
+
+### 前置条件
+
+- **必须配 AI**（「全局设置 → AI 模型」，要能识图）；没配会直接失败并提示
+- 必须装 Microsoft Edge（找不到 `msedge.exe` 会明确报错）
+- 需要有桌面会话（远程桌面断开/锁屏时截图是黑的，识图会失败）
+
+### 关键配置项（`config/tasks/ourbits.yaml`）
+
+| 选项 | 默认 | 说明 |
+|---|---|---|
+| `desktop_mode` | `true` | `false` 退回 Playwright 自动化，用来排查「是站点变了还是识图出问题」 |
+| `pydoll_login` | `true` | 用 pydoll 登录（无 WebDriver 指纹，不触发 CF） |
+| `desktop_profile` | `data/desktop_profile` | 正常浏览器用的独立 profile，cookie 存在这里 |
+| `normal_maximized` / `normal_topmost` | `true` | 最大化 / 置顶，别让别的窗口盖住截图 |
+| `keep_normal_open` | `false` | 跑完是否留着浏览器 |
+| `desktop_startup_wait` | `6` | 打开浏览器后等几秒再开始识图 |
+| `desktop_max_steps` | `20` | 识图点击步数上限，卡住时调到 30 |
+
+> 自动化模式（`desktop_mode: false`）用 `checkin_url: "/attendance.php"` +
+> `checkin_btn: "input[type='submit'][value*='签到']"`，判定文案是 NexusPHP attendance 通用那套
+> （签到成功 / 今日已签到 / 明天再来）。
+
 ## 人机验证（Cloudflare）实时处理
 
 `core/cf.py` 是所有任务共用的挑战处理模块，核心原则是**每秒实时探测，绝不降级为被动等待**。
@@ -487,6 +551,24 @@ class MySiteTask(BaseTask):
 
 框架内置能力：`ctx.browser`（点击/填表/元素截图/拟人点击）、`ctx.captcha`（AI 验证码识别）、
 `ctx.slider`（AI 滑块）、`ctx.cf`（CF 挑战）、`ctx.cookiecloud`、`ctx.totp`、`ctx.events`。
+
+**站点人机验证很凶、自动化怎么都过不去时**：继承 `NexusPHPTask` 的同时混入
+`tasks.desktop_signin.DesktopSigninMixin`，再写一段 `DESKTOP_GOAL` 告诉 AI 要点哪里，就能复用
+「正常浏览器 + AI 识图点击」那套（OurBits 任务就是范例）：
+
+```python
+from .desktop_signin import DesktopSigninMixin
+
+@register
+class MySiteTask(DesktopSigninMixin, NexusPHPTask):
+    id = "my_site"
+    DESKTOP_TITLE = "MySite"
+    DESKTOP_GOAL = "在 MySite 点「签到」…看到「签到成功」就 finish(passed=true)"
+    CHECKIN_URL = "/attendance.php"
+```
+
+桌面模式下 `needs_browser()` 返回 `False`，管理器就不会启动自动化浏览器；跑完会自动关闭
+本程序打开的浏览器。任务配置里写 `desktop_mode: false` 可临时退回自动化流程排查问题。
 
 ## 打包 exe
 

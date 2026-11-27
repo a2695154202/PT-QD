@@ -48,6 +48,7 @@ KNOWN_TASKS = (
     "tasks.mteam",
     "tasks.akile",
     "tasks.hhan",
+    "tasks.ourbits",
 )
 
 

@@ -35,6 +35,7 @@ class NexusPHPTask(BaseTask):
     # 于是「触发了验证码却没人填」。这里覆盖常见的输入框命名。
     SEL_2FA_CANDIDATES = (
         "input[name='2fa']",                       # 杜比 / 部分 NexusPHP 变体
+        "input[name='2fa_code']",                  # OurBits（OB）
         "input[name='oneCode']",                   # 原生 NexusPHP
         "input[name='two_step_code']",             # hhanclub 风格
         "input[name='code'][maxlength='6']",

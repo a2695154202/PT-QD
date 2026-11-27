@@ -29,7 +29,7 @@ hiddenimports = [
     "core.browser_bridge", "core.desktop", "core.desktop_agent",
     "tasks.base", "tasks.manager", "tasks.nexusphp",
     "tasks.pt_kong", "tasks.hddolby", "tasks.ttg", "tasks.mteam",
-    "tasks.akile", "tasks.hhan",
+    "tasks.akile", "tasks.hhan", "tasks.ourbits", "tasks.desktop_signin",
     "ui.gui",
     "cryptography.hazmat.primitives.ciphers",
     "cryptography.hazmat.primitives.padding",
